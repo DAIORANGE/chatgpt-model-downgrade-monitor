@@ -54,12 +54,19 @@ When these sources disagree, the UI explains **which fields disagree, how many e
 - short prompt/reply previews to identify historical turns;
 - local history, network labels, model statistics and anomaly counts;
 - PoW trend visualization and network-side auxiliary observations;
-- nine switchable themes;
-- clickable `ⓘ` concept cards for PoW, RTT, server routing and other technical terms;
+- **anime-friendly multi-theme UI** with nine switchable Japanese-inspired / light-anime / light-dark themes;
+- **beginner-friendly explanations** for PoW, RTT, server routing and other technical concepts through clickable `ⓘ` cards;
+- **settings with plain-language annotations** that try to explain what each switch actually changes and when it is useful, instead of exposing raw engineering labels only;
 - optional visual alerts, selectable alert sounds, volume control and preview;
 - movable/resizable panel with persisted geometry;
 - a built-in **GitHub project** link inside the userscript UI;
 - observer-only design: it does not modify request bodies, headers, cookies, model selection or ChatGPT answer content.
+
+### Design goal: understandable, not merely functional
+
+Model-routing inspection naturally contains developer-oriented terminology. This project tries to translate that into plain language: the main UI prioritizes the requested model, response model, and the exact reason a status was triggered, while technical details live behind `ⓘ` cards and evidence panels.
+
+The same principle applies to settings. Options such as anomaly alerts, sounds, per-reply model warnings, and conversation-summary persistence are accompanied by short explanations so users do not have to guess what a switch will do before enabling it.
 
 ## Installation
 
