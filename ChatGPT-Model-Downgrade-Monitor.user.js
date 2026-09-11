@@ -56,6 +56,7 @@ const CONFIG = {
   TOAST_DURATION_MS: 5000,
   WS_MAX_FRAME_BYTES: 2 * 1024 * 1024,
   WS_MAX_ENCODED_ITEM_BYTES: 1024 * 1024,
+  FINALIZE_GRACE_MS: 2000,
   DEFAULT_SETTINGS: {
     settingsVersion: 2,
     theme: "wisteria",
@@ -754,6 +755,247 @@ function runVerdict({ requested, resolved, resolvedSource, server, serverSource,
 }
 
 /* ------------------------------------------------------------------ */
+/* TURN-LEVEL EVIDENCE AGGREGATOR                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * TurnEvidence — one user question + one ChatGPT answer = one history card.
+ * Fetch and WebSocket are transport sources, NOT separate turns.
+ *
+ * Merge rules:
+ *   1. exact messageId match (strongest)
+ *   2. active turn + same conversationId
+ *   3. WS evidence arriving post-DONE enriches same turn during grace period
+ *   4. null from one transport MUST NOT erase non-null from another
+ */
+
+const LIFECYCLE = Object.freeze({
+  COLLECTING: "collecting",
+  STREAM_DONE: "stream_done",
+  FINALIZED: "finalized",
+  GRACE: "grace"
+});
+
+function createTurnEvidence(streamId) {
+  return {
+    turnId: crypto.randomUUID(),
+    conversationId: null,
+    streamId: streamId || null,
+    messageId: null,
+
+    requestedModel: null,
+    requestedSource: null,
+    resolvedModel: null,
+    resolvedSource: null,
+    serverModel: null,
+    serverSource: null,
+    assistantModel: null,
+    assistantSource: null,
+
+    promptPreview: null,
+    promptTopic: null,
+    replyPreview: null,
+    replyTopic: null,
+    replyIsCode: false,
+
+    internalMessages: [],
+    transportsSeen: {},
+    networkLabel: null,
+    networkConnection: null,
+    powRaw: null,
+    powDecimal: null,
+
+    evidenceEvents: [],
+
+    lifecycle: LIFECYCLE.COLLECTING,
+    finalizedAt: null,
+    startedAt: Date.now(),
+    pendingCapture: null
+  };
+}
+
+const TurnAggregator = {
+  activeTurn: null,
+  finalized: [],
+  graceTimer: null,
+  turnsByMessageId: new Map(),
+  seenEvidenceKeys: new Set(),
+
+  getOrCreateActiveTurn(streamId, conversationId) {
+    if (this.activeTurn && !this.activeTurn.finalizedAt) {
+      if (streamId && this.activeTurn.streamId === streamId) return this.activeTurn;
+      if (conversationId && this.activeTurn.conversationId === conversationId) return this.activeTurn;
+    }
+    // existing turn entering grace
+    if (this.activeTurn && this.activeTurn.lifecycle === LIFECYCLE.STREAM_DONE) {
+      this.activeTurn.lifecycle = LIFECYCLE.GRACE;
+      if (this.graceTimer) clearTimeout(this.graceTimer);
+      this.graceTimer = setTimeout(function(){ TurnAggregator.finalizeGrace(); }, CONFIG.FINALIZE_GRACE_MS);
+    }
+    var turn = createTurnEvidence(streamId);
+    if (conversationId) turn.conversationId = conversationId;
+    this.activeTurn = turn;
+    return turn;
+  },
+
+  finalizeGrace() {
+    if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null; }
+    if (!this.activeTurn || this.activeTurn.lifecycle === LIFECYCLE.FINALIZED) return;
+    this.finalizeActiveTurn();
+  },
+
+  finalizeActiveTurn() {
+    if (!this.activeTurn || this.activeTurn.lifecycle === LIFECYCLE.FINALIZED) return;
+    if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null; }
+    var turn = this.activeTurn;
+    turn.lifecycle = LIFECYCLE.FINALIZED;
+    turn.finalizedAt = Date.now();
+    this.finalized.push(turn);
+    if (this.finalized.length > 100) this.finalized.shift();
+    State.emitTurn(turn);
+    this.activeTurn = null;
+    this.graceTimer = null;
+  },
+
+  /* Provenance: non-null wins. null from one transport must not erase another. */
+  applyRequestCapture(turn, entry) {
+    turn.pendingCapture = entry;
+    if (entry.requestedModel) {
+      turn.requestedModel = entry.requestedModel;
+      turn.requestedSource = entry.requestedSource || "conversation_request.model";
+    }
+    if (!turn.conversationId && entry.conversationId) turn.conversationId = entry.conversationId;
+    if (entry.promptPreview) { turn.promptPreview = entry.promptPreview; turn.promptTopic = entry.promptTopic; }
+    if (entry.network) {
+      turn.networkLabel = entry.network.label || turn.networkLabel;
+      turn.networkConnection = entry.network.connection || turn.networkConnection;
+    }
+  },
+
+  applyEvidence(turn, evidence, transport) {
+    if (transport) turn.transportsSeen[transport] = true;
+
+    var eventRecord = {
+      transport: transport,
+      conversationId: evidence.conversationId,
+      messageId: evidence.messageId,
+      requestedModel: evidence.requestedModel,
+      resolvedModel: evidence.resolvedModel,
+      serverModel: evidence.serverModel,
+      assistantModel: evidence.assistantModel,
+      ts: Date.now()
+    };
+    turn.evidenceEvents.push(eventRecord);
+    if (turn.evidenceEvents.length > 50) turn.evidenceEvents.shift();
+
+    if (evidence.conversationId && !turn.conversationId) turn.conversationId = evidence.conversationId;
+    if (evidence.messageId) {
+      if (!turn.messageId) turn.messageId = evidence.messageId;
+      this.turnsByMessageId.set(evidence.messageId, turn);
+    }
+
+    /* NON-NULL evidence wins. null transport = no opinion. */
+    if (evidence.requestedModel) { turn.requestedModel = evidence.requestedModel; turn.requestedSource = evidence.requestedSource || "ws"; }
+    if (evidence.resolvedModel) { turn.resolvedModel = evidence.resolvedModel; turn.resolvedSource = evidence.resolvedSource || turn.resolvedSource; }
+    if (evidence.serverModel) { turn.serverModel = evidence.serverModel; turn.serverSource = evidence.serverSource || turn.serverSource; }
+    if (evidence.assistantModel) { turn.assistantModel = evidence.assistantModel; turn.assistantSource = evidence.assistantSource || turn.assistantSource; }
+    if (evidence.replyPreview) {
+      turn.replyPreview = evidence.replyPreview;
+      turn.replyTopic = evidence.replyTopic || turn.replyTopic;
+      turn.replyIsCode = Boolean(evidence.replyIsCode);
+    }
+
+    /* Deduplicated internalMessages by messageId */
+    if (evidence.messageId && (evidence.assistantModel || evidence.resolvedModel)) {
+      var dup = false;
+      for (var k = 0; k < turn.internalMessages.length; k++) {
+        if (turn.internalMessages[k].messageId === evidence.messageId) { dup = true; break; }
+      }
+      if (!dup) {
+        turn.internalMessages.push({
+          messageId: evidence.messageId,
+          role: evidence.role || null,
+          assistantModel: evidence.assistantModel || null,
+          resolvedModel: evidence.resolvedModel || null
+        });
+        if (turn.internalMessages.length > CONFIG.MAX_INTERNAL_MESSAGES) turn.internalMessages.shift();
+      }
+    }
+
+    if (!turn.networkLabel) {
+      var snap = currentNetworkSnapshot();
+      turn.networkLabel = snap.label;
+      turn.networkConnection = snap.connection;
+    }
+  },
+
+  markStreamDone(streamId) {
+    if (!this.activeTurn) return;
+    if (this.activeTurn.streamId === streamId && this.activeTurn.lifecycle === LIFECYCLE.COLLECTING) {
+      this.activeTurn.lifecycle = LIFECYCLE.STREAM_DONE;
+      if (this.graceTimer) clearTimeout(this.graceTimer);
+      var self = this;
+      this.graceTimer = setTimeout(function(){ self.finalizeGrace(); }, CONFIG.FINALIZE_GRACE_MS);
+    }
+  },
+
+  associatePow(turn, powSample) {
+    if (!turn.powRaw) {
+      turn.powRaw = powSample.rawHex;
+      turn.powDecimal = powSample.decimal;
+    }
+  },
+
+  findTurnByMessageId(messageId) {
+    if (this.turnsByMessageId.has(messageId)) return this.turnsByMessageId.get(messageId);
+    if (this.activeTurn && this.activeTurn.messageId === messageId && !this.activeTurn.finalizedAt) return this.activeTurn;
+    for (var i = this.finalized.length - 1; i >= 0; i--) {
+      if (this.finalized[i].messageId === messageId) return this.finalized[i];
+    }
+    return null;
+  },
+
+  findTurnByConversation(conversationId) {
+    if (this.activeTurn && this.activeTurn.conversationId === conversationId && !this.activeTurn.finalizedAt) return this.activeTurn;
+    for (var i = this.finalized.length - 1; i >= 0; i--) {
+      if (this.finalized[i].conversationId === conversationId) return this.finalized[i];
+    }
+    return null;
+  },
+
+  makeEvidenceKey(evidence, transport) {
+    return [
+      evidence.conversationId || "_",
+      evidence.messageId || "_",
+      transport || "_",
+      evidence.resolvedModel || "_",
+      evidence.serverModel || "_",
+      evidence.messageId ? "assistant:" + (evidence.assistantModel || "_") : "_"
+    ].join("|");
+  },
+
+  isDuplicateEvidence(evidence, transport) {
+    var key = this.makeEvidenceKey(evidence, transport);
+    if (this.seenEvidenceKeys.has(key)) return true;
+    this.seenEvidenceKeys.add(key);
+    if (this.seenEvidenceKeys.size > 500) {
+      var it = this.seenEvidenceKeys.values().next();
+      if (!it.done) this.seenEvidenceKeys.delete(it.value);
+    }
+    return false;
+  },
+
+  reset() {
+    if (this.graceTimer) clearTimeout(this.graceTimer);
+    this.activeTurn = null;
+    this.finalized = [];
+    this.graceTimer = null;
+    this.turnsByMessageId.clear();
+    this.seenEvidenceKeys.clear();
+  }
+};
+
+/* ------------------------------------------------------------------ */
 /* MESSAGE BUS                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -1299,16 +1541,24 @@ const TitleFlasher = {
  */
 
 const State = {
-  _last:null,_dedupe:new Map(),_historyWritten:new Set(),_powSeen:0,_hooks:{fetch:false,sse:false,pow:"waiting",ws:false},_sessionEntries:[],
+  _last:null,_dedupe:new Map(),_historyWritten:new Set(),_powSeen:0,_hooks:{fetch:false,sse:false,pow:"waiting",ws:false},_sessionEntries:[],_latestPow:null,
   setHooks(h){Object.assign(this._hooks,h)},
   hookHealth(){const h=this._hooks,overall=h.fetch&&h.sse?'READY':(h.fetch||h.sse)?'PARTIAL':'FAILED';return{overall,fetch:h.fetch,sse:h.sse,pow:h.pow,ws:h.ws}},
-  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection};addPowSample(enriched);postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
-  resetSession(){this._last=null;this._dedupe.clear();this._historyWritten.clear();this._sessionEntries=[]},
-  historyForUi(){const persisted=loadHistory(),all=[...this._sessionEntries,...persisted],seen=new Set(),out=[];for(const x of all){const k=x.captureId||`${x.timestamp}:${x.messageId||x.conversationId||''}`;if(seen.has(k))continue;seen.add(k);out.push(x);if(out.length>=CONFIG.MAX_HISTORY)break;}return out},
+  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection};this._latestPow=enriched;addPowSample(enriched);if(TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt)TurnAggregator.associatePow(TurnAggregator.activeTurn,sample);postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
+  resetSession(){this._last=null;this._dedupe.clear();this._historyWritten.clear();this._sessionEntries=[];TurnAggregator.reset()},
+  historyForUi(){const persisted=loadHistory(),all=[...this._sessionEntries,...persisted],seen=new Set(),out=[];for(const x of all){const k=x.captureId||x.turnId||`${x.timestamp}:${x.messageId||x.conversationId||''}`;if(seen.has(k))continue;seen.add(k);out.push(x);if(out.length>=CONFIG.MAX_HISTORY)break;}return out},
+  // v1.5: emitTurn called by TurnAggregator after finalization.
+  emitTurn(turn){
+    const pow=this._latestPow||null;
+    const entry={captureId:turn.turnId,turnId:turn.turnId,timestamp:turn.startedAt,conversationId:turn.conversationId||null,messageId:turn.messageId||null,requestedModel:turn.requestedModel||null,resolvedModel:turn.resolvedModel||null,assistantModel:turn.assistantModel||null,serverModel:turn.serverModel||null,requestedSource:turn.requestedSource||null,resolvedSource:turn.resolvedSource||null,assistantSource:turn.assistantSource||null,serverSource:turn.serverSource||null,promptPreview:turn.promptPreview||null,promptTopic:turn.promptTopic||null,replyPreview:turn.replyPreview||null,replyTopic:turn.replyTopic||null,replyIsCode:Boolean(turn.replyIsCode),internalMessages:Array.isArray(turn.internalMessages)?turn.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:turn.networkLabel||'',networkConnection:turn.networkConnection||null,powRaw:turn.powRaw||(pow&&pow.rawHex)||null,powDecimal:turn.powDecimal||(pow&&pow.decimal)||null,transport:Object.keys(turn.transportsSeen||{}).join(',')||'fetch',transportsSeen:turn.transportsSeen||{}};
+    const result=runVerdict({requested:entry.requestedModel,resolved:entry.resolvedModel,resolvedSource:entry.resolvedSource,server:entry.serverModel,serverSource:entry.serverSource,assistant:entry.assistantModel,assistantSource:entry.assistantSource});
+    entry.verdict=result.verdict;entry.confidence=result.confidence;entry.evidenceConflict=result.verdict===VERDICT.EVIDENCE_CONFLICT;entry.reasons=result.reasons;
+    this._last=entry;const key=entry.captureId||entry.messageId||entry.conversationId||entry.timestamp;if(this._historyWritten.has(key)){Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();return;}this._historyWritten.add(key);if(this._historyWritten.size>300){const o=this._historyWritten.keys().next().value;if(o!==undefined)this._historyWritten.delete(o)}this._sessionEntries.unshift(entry);this._sessionEntries=this._sessionEntries.slice(0,CONFIG.MAX_HISTORY);addHistoryEntry(entry);postBus(MSG_TYPE.ROUTE_RESULT,persistableEntry(entry));this.alert(entry);Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();
+  },
   handleRouteEvidence(evidence){
     const result=runVerdict({requested:evidence.requestedModel||null,resolved:evidence.resolvedModel||null,resolvedSource:evidence.resolvedSource||null,server:evidence.serverModel||null,serverSource:evidence.serverSource||null,assistant:evidence.assistantModel||null,assistantSource:evidence.assistantSource||null});
     const pow=loadPowHistory()[0]||null,network=evidence.network||currentNetworkSnapshot();
-    const entry={captureId:evidence.captureId||crypto.randomUUID(),timestamp:Date.now(),conversationId:evidence.conversationId||null,messageId:evidence.messageId||null,requestedModel:evidence.requestedModel||null,resolvedModel:evidence.resolvedModel||null,assistantModel:evidence.assistantModel||null,serverModel:evidence.serverModel||null,requestedSource:evidence.requestedSource||null,resolvedSource:evidence.resolvedSource||null,assistantSource:evidence.assistantSource||null,serverSource:evidence.serverSource||null,promptPreview:evidence.promptPreview||null,promptTopic:evidence.promptTopic||null,replyPreview:evidence.replyPreview||null,replyTopic:evidence.replyTopic||null,replyIsCode:Boolean(evidence.replyIsCode),internalMessages:Array.isArray(evidence.internalMessages)?evidence.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:network.label||'未命名网络',networkConnection:network.connection||null,powRaw:pow&&pow.rawHex||null,powDecimal:pow&&pow.decimal||null,verdict:result.verdict,confidence:result.confidence,transport:evidence.transport||'fetch',evidenceConflict:result.verdict===VERDICT.EVIDENCE_CONFLICT,reasons:result.reasons};
+    const entry={turnId:evidence.captureId||crypto.randomUUID(),captureId:evidence.captureId||crypto.randomUUID(),timestamp:Date.now(),conversationId:evidence.conversationId||null,messageId:evidence.messageId||null,requestedModel:evidence.requestedModel||null,resolvedModel:evidence.resolvedModel||null,assistantModel:evidence.assistantModel||null,serverModel:evidence.serverModel||null,requestedSource:evidence.requestedSource||null,resolvedSource:evidence.resolvedSource||null,assistantSource:evidence.assistantSource||null,serverSource:evidence.serverSource||null,promptPreview:evidence.promptPreview||null,promptTopic:evidence.promptTopic||null,replyPreview:evidence.replyPreview||null,replyTopic:evidence.replyTopic||null,replyIsCode:Boolean(evidence.replyIsCode),internalMessages:Array.isArray(evidence.internalMessages)?evidence.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:network.label||'',networkConnection:network.connection||null,powRaw:pow&&pow.rawHex||null,powDecimal:pow&&pow.decimal||null,verdict:result.verdict,confidence:result.confidence,transport:evidence.transport||'fetch',evidenceConflict:result.verdict===VERDICT.EVIDENCE_CONFLICT,reasons:result.reasons};
     this._last=entry;const key=entry.captureId||entry.messageId||entry.conversationId||entry.timestamp;if(this._historyWritten.has(key)){Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();return;}this._historyWritten.add(key);if(this._historyWritten.size>300){const o=this._historyWritten.keys().next().value;if(o!==undefined)this._historyWritten.delete(o)}this._sessionEntries.unshift(entry);this._sessionEntries=this._sessionEntries.slice(0,CONFIG.MAX_HISTORY);addHistoryEntry(entry);postBus(MSG_TYPE.ROUTE_RESULT,persistableEntry(entry));this.alert(entry);Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();
   },
   alert(entry){
@@ -1499,10 +1749,13 @@ const Network = {
     const decoder = new TextDecoder("utf-8", { fatal: false });
     const self = this;
     const streamId = crypto.randomUUID(); // one stream == one user turn
-    this.accum.set(`stream:${streamId}`, { key:`stream:${streamId}`, captureId:null, conversationId:null, streamId, messageId:null, requestedModel:null, requestedSource:null, assistantModel:null, assistantSource:null, resolvedModel:null, resolvedSource:null, serverModel:null, serverSource:null, promptPreview:null, promptTopic:null, replyPreview:null, replyTopic:null, replyIsCode:false, internalMessages:[], network:null, transport:"fetch", finalized:false });
+    var turn = TurnAggregator.getOrCreateActiveTurn(streamId, null);
     if (requestCapturePromise && typeof requestCapturePromise.then === "function") {
       requestCapturePromise.then((entry) => {
-        if (entry) self.streamPending.set(streamId, entry);
+        if (entry) {
+          self.streamPending.set(streamId, entry);
+          TurnAggregator.applyRequestCapture(turn, entry);
+        }
       }).catch(() => {});
     }
 
@@ -1551,45 +1804,27 @@ const Network = {
     this.accumulateEvidence(event, "fetch", null);
   },
 
-  // One fetch response stream == one user turn. All internal assistant/tool/server
-  // events are accumulated and written once when the stream closes.
+  // v1.5: Accumulate evidence through TurnAggregator. Fetch → active turn; WS → correlate + merge.
   accumulateEvidence(event, transport, streamId) {
-    const evidence = extractEvidence(event);
+    if (transport === "websocket") {
+      this.applyWsEvidence(event);
+      return;
+    }
+    var evidence = extractEvidence(event);
     if (!evidence.assistantModel && !evidence.resolvedModel && !evidence.serverModel && !evidence.replyPreview) return;
-    const key = streamId ? `stream:${streamId}` : `ws:${evidence.conversationId || evidence.messageId || crypto.randomUUID()}`;
-    let acc = this.accum.get(key);
-    if (!acc) {
-      acc = { key, captureId:null, conversationId:evidence.conversationId||null, streamId:streamId||null, messageId:null, requestedModel:null, requestedSource:null, assistantModel:null, assistantSource:null, resolvedModel:null, resolvedSource:null, serverModel:null, serverSource:null, promptPreview:null, promptTopic:null, replyPreview:null, replyTopic:null, replyIsCode:false, internalMessages:[], network:null, transport, finalized:false };
-      this.accum.set(key, acc);
-    }
-    if (evidence.conversationId) acc.conversationId=evidence.conversationId;
-    if (evidence.messageId) acc.messageId=evidence.messageId;
-    if (evidence.assistantModel){acc.assistantModel=evidence.assistantModel;acc.assistantSource=evidence.assistantSource}
-    if (evidence.resolvedModel){acc.resolvedModel=evidence.resolvedModel;acc.resolvedSource=evidence.resolvedSource}
-    if (evidence.serverModel){acc.serverModel=evidence.serverModel;acc.serverSource=evidence.serverSource}
-    if (evidence.replyPreview){acc.replyPreview=evidence.replyPreview;acc.replyTopic=evidence.replyTopic||acc.replyTopic;acc.replyIsCode=Boolean(evidence.replyIsCode)}
-    if (evidence.messageId && (evidence.assistantModel || evidence.resolvedModel)) {
-      const im={messageId:evidence.messageId,role:evidence.role||null,assistantModel:evidence.assistantModel||null,resolvedModel:evidence.resolvedModel||null};
-      if (!acc.internalMessages.some(x=>x.messageId===im.messageId)) acc.internalMessages.push(im);
-      if (acc.internalMessages.length>CONFIG.MAX_INTERNAL_MESSAGES) acc.internalMessages.shift();
-    }
-    const pending=this.resolvePending(acc);
-    if(pending){acc.captureId=pending.captureId||acc.captureId;acc.requestedModel=pending.requestedModel||acc.requestedModel;acc.requestedSource=pending.requestedSource||acc.requestedSource;acc.promptPreview=pending.promptPreview||acc.promptPreview;acc.promptTopic=pending.promptTopic||acc.promptTopic;acc.network=pending.network||acc.network;acc.conversationId=acc.conversationId||pending.conversationId||null;}
-    // WebSocket has no TransformStream close signal; finalize terminal assistant evidence best-effort.
-    if (!streamId && evidence.role === 'assistant' && (acc.assistantModel || acc.resolvedModel)) this.finalizeTurn(key);
+    var turn = TurnAggregator.activeTurn;
+    if (!turn) turn = TurnAggregator.getOrCreateActiveTurn(streamId, evidence.conversationId);
+    TurnAggregator.applyEvidence(turn, evidence, "fetch");
   },
 
   finalizeTurn(key) {
-    const acc=this.accum.get(key);if(!acc||acc.finalized)return;
-    const pending=this.resolvePending(acc);if(pending){acc.captureId=pending.captureId||acc.captureId;acc.requestedModel=pending.requestedModel||acc.requestedModel;acc.requestedSource=pending.requestedSource||acc.requestedSource;acc.promptPreview=pending.promptPreview||acc.promptPreview;acc.promptTopic=pending.promptTopic||acc.promptTopic;acc.network=pending.network||acc.network;acc.conversationId=acc.conversationId||pending.conversationId||null;}
-    if(!acc.requestedModel&&!acc.assistantModel&&!acc.resolvedModel&&!acc.serverModel)return;
-    acc.finalized=true;this.accum.delete(key);
-    State.handleRouteEvidence({captureId:acc.captureId||crypto.randomUUID(),messageId:acc.messageId||null,conversationId:acc.conversationId||null,requestedModel:acc.requestedModel||null,requestedSource:acc.requestedSource||null,resolvedModel:acc.resolvedModel||null,resolvedSource:acc.resolvedSource||null,serverModel:acc.serverModel||null,serverSource:acc.serverSource||null,assistantModel:acc.assistantModel||null,assistantSource:acc.assistantSource||null,promptPreview:acc.promptPreview||null,promptTopic:acc.promptTopic||null,replyPreview:acc.replyPreview||null,replyTopic:acc.replyTopic||null,replyIsCode:Boolean(acc.replyIsCode),internalMessages:acc.internalMessages||[],network:acc.network||currentNetworkSnapshot(),transport:acc.transport||'fetch'});
-    if(pending){this.pendingCaptures.delete(pending.captureId);if(pending.inputMessageId)this.pendingByInputId.delete(pending.inputMessageId);if(pending.conversationId)this.pendingByConversation.delete(pending.conversationId)}
+    this.accum.delete(key);
   },
 
   finalizeStream(streamId) {
-    if(!streamId)return;const key=`stream:${streamId}`;if(this.accum.has(key))this.finalizeTurn(key);this.streamPending.delete(streamId);
+    if (!streamId) return;
+    TurnAggregator.markStreamDone(streamId);
+    this.streamPending.delete(streamId);
   },
 
   resolvePending(acc) {
@@ -1665,18 +1900,65 @@ const Network = {
       const inner = asRecord(payload.payload) || payload;
       const encodedItem = asString(inner.encoded_item, CONFIG.WS_MAX_ENCODED_ITEM_BYTES);
       if (encodedItem) {
-        // encoded_item is itself a chunk of SSE-ish text
         const itemParser = createSSEParser((event) => {
           this.accumulateEvidence(event, "websocket");
         });
         itemParser.push(encodedItem);
         itemParser.flush();
       } else {
-        // direct event envelope
         this.accumulateEvidence(candidate, "websocket");
       }
     }
-  }
+  },
+
+  // v1.5: WS evidence correlation — merge into existing turn, never create standalone card.
+  applyWsEvidence(rawEvent) {
+    var evidence = extractEvidence(rawEvent);
+    if (!evidence.assistantModel && !evidence.resolvedModel && !evidence.serverModel && !evidence.replyPreview) return;
+    if (TurnAggregator.isDuplicateEvidence(evidence, "websocket")) return;
+
+    // STEP 1: exact messageId match
+    if (evidence.messageId) {
+      var found = TurnAggregator.findTurnByMessageId(evidence.messageId);
+      if (found) { TurnAggregator.applyEvidence(found, evidence, "websocket"); return; }
+    }
+
+    // STEP 2: active turn with matching conversationId
+    if (TurnAggregator.activeTurn && !TurnAggregator.activeTurn.finalizedAt) {
+      if (evidence.conversationId && TurnAggregator.activeTurn.conversationId === evidence.conversationId) {
+        TurnAggregator.applyEvidence(TurnAggregator.activeTurn, evidence, "websocket");
+        return;
+      }
+    }
+
+    // STEP 3: grace period — finished turn with matching conversationId
+    if (TurnAggregator.activeTurn && (TurnAggregator.activeTurn.lifecycle === LIFECYCLE.STREAM_DONE || TurnAggregator.activeTurn.lifecycle === LIFECYCLE.GRACE)) {
+      if (evidence.conversationId && TurnAggregator.activeTurn.conversationId === evidence.conversationId) {
+        TurnAggregator.activeTurn.lifecycle = LIFECYCLE.GRACE;
+        if (TurnAggregator.graceTimer) clearTimeout(TurnAggregator.graceTimer);
+        var self = this;
+        TurnAggregator.graceTimer = setTimeout(function(){ TurnAggregator.finalizeGrace(); }, CONFIG.FINALIZE_GRACE_MS);
+        TurnAggregator.applyEvidence(TurnAggregator.activeTurn, evidence, "websocket");
+        return;
+      }
+    }
+
+    // STEP 4: finalized turn with matching conversationId (within grace window)
+    if (evidence.conversationId) {
+      var recent = TurnAggregator.findTurnByConversation(evidence.conversationId);
+      if (recent && recent.lifecycle === LIFECYCLE.FINALIZED && (Date.now() - recent.finalizedAt) < CONFIG.FINALIZE_GRACE_MS) {
+        recent.lifecycle = LIFECYCLE.STREAM_DONE;
+        recent.finalizedAt = null;
+        TurnAggregator.activeTurn = recent;
+        TurnAggregator.applyEvidence(recent, evidence, "websocket");
+        var self2 = this;
+        TurnAggregator.graceTimer = setTimeout(function(){ TurnAggregator.finalizeGrace(); }, CONFIG.FINALIZE_GRACE_MS);
+        return;
+      }
+    }
+
+    // Uncorrelated WS evidence — discard silently, never create standalone card.
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -1716,6 +1998,13 @@ window.__chatgptModelDowngradeMonitor = {
       installed: Network.installed,
       hooks: State.hookHealth(),
       latest: State.lastRouteResult(),
+      activeTurn: TurnAggregator.activeTurn ? {
+        turnId: TurnAggregator.activeTurn.turnId,
+        lifecycle: TurnAggregator.activeTurn.lifecycle,
+        transports: Object.keys(TurnAggregator.activeTurn.transportsSeen||{}),
+        messageId: TurnAggregator.activeTurn.messageId
+      } : null,
+      finalizedCount: TurnAggregator.finalized.length,
       historyCount: loadHistory().length,
       powCount: loadPowHistory().length
     };
@@ -1772,8 +2061,97 @@ window.__chatgptModelDowngradeMonitor = {
       transport: "debug"
     });
   },
-  // Debug-only internals for automated tests; not a stable public API.
-  _internals: { Network, State, SSEParser: createSSEParser }
+  debugTurn() {
+    var t = TurnAggregator.activeTurn || State._last;
+    if (!t) return null;
+    return {
+      turnId: t.turnId || null,
+      conversationId: t.conversationId || null,
+      messageId: t.messageId || null,
+      transportsSeen: t.transportsSeen || {},
+      requestedModel: t.requestedModel, requestedSource: t.requestedSource,
+      resolvedModel: t.resolvedModel, resolvedSource: t.resolvedSource,
+      assistantModel: t.assistantModel, assistantSource: t.assistantSource,
+      serverModel: t.serverModel, serverSource: t.serverSource,
+      evidenceEvents: (t.evidenceEvents || []).length,
+      internalMessages: (t.internalMessages || []).length,
+      lifecycle: t.lifecycle,
+      finalizedAt: t.finalizedAt,
+      verdict: t.verdict || t.primaryVerdict
+    };
+  },
+  // v1.5 CASE A: Fetch + WS same messageId => ONE turn, no duplication, 4/4 evidence
+  testRegCaseA() {
+    State.resetSession();
+    TurnAggregator.reset();
+    var turn = TurnAggregator.getOrCreateActiveTurn("stream-a", "C-A");
+    TurnAggregator.applyRequestCapture(turn, {
+      captureId: "cap-a", requestedModel: "gpt-5-6-thinking", requestedSource: "conversation_request.model",
+      conversationId: "C-A", promptPreview: "example prompt", network: currentNetworkSnapshot()
+    });
+    TurnAggregator.applyEvidence(turn, {
+      messageId: "M-A", resolvedModel: "gpt-5-6-thinking", resolvedSource: "message.metadata.resolved_model_slug",
+      assistantModel: "gpt-5-6-thinking", assistantSource: "assistant.metadata.model_slug",
+      serverModel: "gpt-5-6-thinking", serverSource: "server_ste_metadata.model_slug"
+    }, "fetch");
+    TurnAggregator.applyEvidence(turn, {
+      conversationId: "C-A", messageId: "M-A",
+      resolvedModel: "gpt-5-6-thinking", assistantModel: "gpt-5-6-thinking"
+    }, "websocket");
+    // duplicate WS
+    TurnAggregator.applyEvidence(turn, {
+      conversationId: "C-A", messageId: "M-A",
+      resolvedModel: "gpt-5-6-thinking", assistantModel: "gpt-5-6-thinking"
+    }, "websocket");
+    TurnAggregator.markStreamDone("stream-a");
+    // force finalize
+    if (TurnAggregator.graceTimer) { clearTimeout(TurnAggregator.graceTimer); TurnAggregator.graceTimer = null; }
+    TurnAggregator.finalizeActiveTurn();
+    var entry = State._last;
+    var result = {
+      turnId: entry ? entry.turnId : null,
+      requestedModel: entry ? entry.requestedModel : null,
+      resolvedModel: entry ? entry.resolvedModel : null,
+      assistantModel: entry ? entry.assistantModel : null,
+      serverModel: entry ? entry.serverModel : null,
+      transportsSeen: entry ? entry.transportsSeen : {},
+      imCount: Array.isArray(entry && entry.internalMessages) ? entry.internalMessages.length : 0,
+      verdict: entry ? entry.verdict : null,
+      historyLen: loadHistory().length
+    };
+    return result;
+  },
+  // v1.5 CASE B: Genuine model disagreement preserved (5.6 req → 5.4 answer)
+  testRegCaseB() {
+    State.resetSession();
+    TurnAggregator.reset();
+    var turn = TurnAggregator.getOrCreateActiveTurn("stream-b", "C-B");
+    TurnAggregator.applyRequestCapture(turn, {
+      captureId: "cap-b", requestedModel: "gpt-5-6-thinking", requestedSource: "conversation_request.model",
+      conversationId: "C-B", promptPreview: "mismatch test", network: currentNetworkSnapshot()
+    });
+    TurnAggregator.applyEvidence(turn, {
+      messageId: "M-B", serverModel: "gpt-5-6-thinking", serverSource: "server_ste_metadata.model_slug"
+    }, "fetch");
+    TurnAggregator.applyEvidence(turn, {
+      messageId: "M-B", resolvedModel: "gpt-5-4-auto-thinking", resolvedSource: "message.metadata.resolved_model_slug",
+      assistantModel: "gpt-5-4-thinking", assistantSource: "assistant.metadata.model_slug"
+    }, "websocket");
+    TurnAggregator.markStreamDone("stream-b");
+    if (TurnAggregator.graceTimer) { clearTimeout(TurnAggregator.graceTimer); TurnAggregator.graceTimer = null; }
+    TurnAggregator.finalizeActiveTurn();
+    var entry = State._last;
+    return {
+      turnId: entry ? entry.turnId : null,
+      requestedModel: entry ? entry.requestedModel : null,
+      resolvedModel: entry ? entry.resolvedModel : null,
+      assistantModel: entry ? entry.assistantModel : null,
+      serverModel: entry ? entry.serverModel : null,
+      verdict: entry ? entry.verdict : null,
+      historyLen: loadHistory().length
+    };
+  },
+  _internals: { Network, State, TurnAggregator, SSEParser: createSSEParser }
 };
 
 window.__chatgptGuardPro = window.__chatgptModelDowngradeMonitor; // v1.x compatibility
@@ -1788,24 +2166,15 @@ window.__chatgptGuardPro = window.__chatgptModelDowngradeMonitor; // v1.x compat
     if (!/chatgpt\.com|chat\.openai\.com/i.test(window.location.hostname)) return;
     Network.install();
     ensureUiAfterDom();
-    // Low-frequency re-assert + prune (cheap; ~1Hz) so SPA route changes and
-    // React re-renders never permanently break the hooks.
     safeSetInterval(() => {
       try {
         Network.prunePendingCaptures();
         if (!Network.fetchInstalled) Network.installFetchHook();
         if (!Network.wsInstalled) Network.installWebSocketHook();
         if (!document.getElementById("chatgpt-model-downgrade-monitor-badge")) Badge.setStatus(State._last ? State._last.verdict : null, State._last ? (State._last.resolvedModel || State._last.assistantModel) : null);
-      } catch {
-        /* fail open */
-      }
+      } catch { /* fail open */ }
     }, 1000);
   } catch (err) {
-    // fail open: Guard errors never break ChatGPT
-    try {
-      console.warn("[ChatGPT Model Downgrade Monitor] init error (fail-open):", err);
-    } catch {
-      /* no-op */
-    }
+    try { console.warn("[ChatGPT Model Downgrade Monitor] init error (fail-open):", err); } catch {}
   }
 })();
