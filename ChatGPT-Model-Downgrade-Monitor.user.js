@@ -3,7 +3,7 @@
 // @name:zh-CN   ChatGPT Model Downgrade Monitor | 模型鉴定姬
 // @name:en      ChatGPT Model Downgrade Monitor
 // @namespace    chatgpt-model-downgrade-monitor
-// @version      1.5.0-rc.1
+// @version      1.5.0-rc.2
 // @description  Detect ChatGPT silent model downgrades, hidden model routing, mini fallbacks, and requested-vs-response model mismatches. Designed for Tampermonkey users on Firefox and Chromium-family browsers.
 // @description:zh-CN  检测 ChatGPT 请求模型、服务器路由与最终应答模型是否一致，帮助发现静默模型切换、mini fallback 与路由冲突；重点面向 Firefox 及其他可安装 Tampermonkey 的桌面浏览器。
 // @description:en  Monitor requested, routed, resolved and assistant-reported ChatGPT models to surface silent model switches and routing conflicts, with Firefox/Tampermonkey compatibility as a primary goal.
@@ -849,6 +849,38 @@ const TurnAggregator = {
     if (!this.activeTurn || this.activeTurn.lifecycle === LIFECYCLE.FINALIZED) return;
     if (this.graceTimer) { clearTimeout(this.graceTimer); this.graceTimer = null; }
     var turn = this.activeTurn;
+    // Compute verdict + findings ON THE TURN so downstream consumers
+    // (FloatingMonitor, PoW chart) can read primaryVerdict/findings directly.
+    var result = runVerdict({
+      requested: turn.requestedModel,
+      resolved: turn.resolvedModel,
+      resolvedSource: turn.resolvedSource,
+      server: turn.serverModel,
+      serverSource: turn.serverSource,
+      assistant: turn.assistantModel,
+      assistantSource: turn.assistantSource
+    });
+    turn.primaryVerdict = result.verdict;
+    turn.confidence = result.confidence;
+    turn.reasons = result.reasons;
+    // Derive machine-readable findings from the verdict for UI/colors.
+    turn.findings = [];
+    if (result.verdict === VERDICT.NORMAL) turn.findings.push('CORE_MATCH');
+    else if (result.verdict === VERDICT.MODEL_MISMATCH || result.verdict === VERDICT.DOWNGRADE_SUSPECTED) {
+      turn.findings.push('REQUEST_RESPONSE_MISMATCH');
+      var rf = [
+        turn.resolvedModel, turn.serverModel
+      ].filter(function(x){ return x; });
+      if (rf.length >= 1 && turn.assistantModel && rf.some(function(x){ return x !== turn.assistantModel; })) {
+        turn.findings.push('ROUTE_EVIDENCE_CONFLICT');
+      }
+    }
+    else if (result.verdict === VERDICT.EVIDENCE_CONFLICT) {
+      turn.findings.push('ROUTE_EVIDENCE_CONFLICT');
+    }
+    else if (result.verdict === VERDICT.ROUTE_NOTICE) turn.findings.push('ROUTE_NOTICE');
+    else turn.findings.push('EVIDENCE_INCOMPLETE');
+
     turn.lifecycle = LIFECYCLE.FINALIZED;
     turn.finalizedAt = Date.now();
     this.finalized.push(turn);
@@ -1341,7 +1373,8 @@ const FloatingMonitor = {
       :host{--accent:#c9a7e8;--panel:#211e2b;--text:#f7f1fb;--surface:#2c2837;--surface2:#181620;--normal:#78dfb0;--danger:#ff879f;--conflict:#c8a0ff;--warn:#f4c96d;--muted:#b8aebe}
       .bar{position:relative;display:flex;align-items:stretch;height:48px;min-width:230px;max-width:280px;padding:0;border-radius:12px;cursor:pointer;user-select:none;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--border, rgba(226,205,239,.20));backdrop-filter:blur(15px) saturate(135%);box-shadow:0 9px 28px rgba(10,8,16,.24);transition:height .28s cubic-bezier(.34,1.56,.64,1),max-width .28s cubic-bezier(.34,1.56,.64,1),border-color .35s ease;overflow:hidden}
       .bar:hover{height:62px;max-width:380px}
-      .bar-left{display:flex;align-items:center;gap:8px;padding:0 10px;min-width:0;flex-shrink:1;pointer-events:none}
+      .bar-main-hit{display:flex;align-items:center;gap:8px;padding:0 10px;min-width:0;flex:1;cursor:pointer;border:0;background:transparent;color:inherit;font:inherit;text-align:left}
+      .bar-main-hit:focus{outline:none}
       .bar-seal{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;flex-shrink:0;background:color-mix(in srgb,var(--accent) 20%,var(--surface2));color:var(--accent);font-size:12px;font-weight:850;transition:background-color .35s,color .35s}
       .bar-model{min-width:0}
       .bar-model-name{font-size:15px;font-weight:700;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:color .35s}
@@ -1349,23 +1382,30 @@ const FloatingMonitor = {
       .bar-model-status.collecting{opacity:.5;animation:bar-pulse-text 1.8s ease-in-out infinite}
       @keyframes bar-pulse-text{0%,100%{opacity:.5}50%{opacity:1}}
       .bar-model-status.hint{font-size:12px;color:var(--muted)}
-      .bar-right{display:flex;align-items:center;padding:0 10px 0 6px;flex-shrink:0;pointer-events:none}
-      .wave-svg{display:block;transition:filter .25s;pointer-events:none}
+      .bar-pow-hit{display:flex;align-items:center;padding:0 10px 0 6px;flex-shrink:0;flex-basis:104px;cursor:pointer;border:0;background:transparent;color:inherit;font:inherit}
+      .bar-pow-hit:focus{outline:none}
+      .wave-svg{display:block;pointer-events:none}
       .wave-svg *{pointer-events:none}
       .pulse-group{pointer-events:none}
-      @media(prefers-reduced-motion:reduce){.bar:hover{height:48px;max-width:280px;transition:none}.bar-model-status.collecting{animation:none}}
-    </style><div class="bar" title="拖动移动 · 点击打开模型鉴定姬 · 双击恢复位置"><div class="bar-left"><span class="bar-seal">鉴</span><div class="bar-model"><div class="bar-model-name">模型鉴定姬</div><div class="bar-model-status hint"></div></div></div><div class="bar-right"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg></div></div>`;
+      /* Expanded: hide left text block so waveform owns the space; seal stays small */
+      .bar:hover .bar-model{opacity:0;width:0;overflow:hidden;margin:0}
+      .bar:hover .bar-main-hit{padding-left:8px}
+      .bar:hover .bar-pow-hit{flex:1;flex-basis:auto;padding:0 10px}
+      @media(prefers-reduced-motion:reduce){.bar:hover{height:48px;max-width:280px;transition:none}.bar:hover .bar-model{opacity:1;width:auto;margin:0}.bar-model-status.collecting{animation:none}}
+    </style><div class="bar"><button class="bar-main-hit" data-region="main" title="打开模型鉴定姬"><span class="bar-seal">鉴</span><span class="bar-model"><span class="bar-model-name">模型鉴定姬</span><span class="bar-model-status hint"></span></span></button><button class="bar-pow-hit" data-region="pow" title="查看 PoW 分析"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg></button></div>`;
     try{document.documentElement.appendChild(this.host)}catch{return this.root}
     this.restorePosition();this.applyTheme();
     var bar=this.root.querySelector('.bar');
     var self=this;
     if(bar){
       this.installDrag(bar);
+      // Stable bar-level click routing via explicit hit-area data-region.
       bar.addEventListener('click',function(e){
         if(self._dragged){self._dragged=false;return}
         AudioFeedback.unlockOnGesture();
-        var waveSvg=self.root.querySelector('.wave-svg');
-        if(waveSvg&&waveSvg.contains(e.target)){
+        var region=null;
+        try{var hit=e.target&&e.target.closest?e.target.closest('[data-region]'):null;region=hit?hit.getAttribute('data-region'):null;}catch(_){}
+        if(region==='pow'){
           Dashboard.show();Dashboard.activeTab='network';Dashboard.powExpanded=true;Dashboard.render();
         }else{
           Dashboard.toggle();
@@ -1580,7 +1620,11 @@ drawWave(){
     this._lastPathD=pathD;
     this._cachedSegCount=n;
     this._cachedSegColors=[];
-    for(var si=0;si<segColors.length;si++)this._cachedSegColors.push(segColors[si].to);
+    this._segColorPairs=[];
+    for(var si=0;si<segColors.length;si++){
+      this._cachedSegColors.push(segColors[si].to);
+      this._segColorPairs.push({from:segColors[si].from,to:segColors[si].to});
+    }
     if(segColors.length>0)this._cachedSegColors.unshift(segColors[0].from);
     this._pulsePathLen=this._getPulsePathLen(svg);
     // Precompute cumulative per-segment path lengths for accurate pulse→segment mapping
@@ -1611,11 +1655,17 @@ drawWave(){
   _renderPulseOnly(){
     var root=this.root;if(!root)return;
     var svg=root.querySelector('.wave-svg');if(!svg)return;
-    var pulseGroup=svg.querySelector('.pulse-group');
-    if(!pulseGroup){
-      pulseGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
-      pulseGroup.setAttribute('class','pulse-group');
-      svg.appendChild(pulseGroup);
+    var pulseIds=['pulse-stroke','pulse-head','pulse-trail1','pulse-trail2'];
+    for(var pi=0;pi<pulseIds.length;pi++){
+      var pe=svg.querySelector('#'+pulseIds[pi]);
+      if(!pe){
+        pe=document.createElementNS('http://www.w3.org/2000/svg','path');
+        pe.setAttribute('id',pulseIds[pi]);
+        pe.setAttribute('fill','none');
+        pe.setAttribute('stroke-linecap','round');
+        pe.style.pointerEvents='none';
+        svg.appendChild(pe);
+      }
     }
     var pathEl=svg.querySelector('#wave-path');
     if(!pathEl)return;
@@ -1627,37 +1677,106 @@ drawWave(){
     if(!this._pulseProgress)this._pulseProgress=0;
     var prog=this._pulseProgress%pathLen;
     var pt=pathEl.getPointAtLength(prog);
-    var trailLen=pathLen*0.06;
 
+    // Exact segment index + local fraction for continuous color interpolation.
     var n=this._cachedSegCount||0;
     var segIndex=0;
+    var localFrac=0;
     if(n>=2){
       var frac=prog/pathLen;
       var cumLen=this._segCumulativeLen;
       if(cumLen&&cumLen.length>0){
-        for(var i=0;i<cumLen.length;i++){if(frac<=cumLen[i]){segIndex=i;break;}segIndex=i+1;}
+        for(var i=0;i<cumLen.length;i++){
+          if(frac<=cumLen[i]){
+            segIndex=i;
+            var prev=i>0?cumLen[i-1]:0;
+            var segSpan=cumLen[i]-prev;
+            localFrac=segSpan>0?(frac-prev)/segSpan:0;
+            break;
+          }
+          segIndex=i+1;
+        }
         if(segIndex>=cumLen.length)segIndex=cumLen.length-1;
       } else {
         segIndex=Math.min(Math.floor(frac*(n-1)),n-2);
+        localFrac=(frac*(n-1))-segIndex;
       }
     }
-    var clr=this._cachedSegColors&&this._cachedSegColors.length>segIndex?this._cachedSegColors[segIndex]:null;
-    if(!clr||clr==='var(--muted)')clr='var(--accent)';
+    var segPairs=this._segColorPairs;
+    var fromClr=segPairs&&segPairs[segIndex]?segPairs[segIndex].from:'var(--accent)';
+    var toClr=segPairs&&segPairs[segIndex]?segPairs[segIndex].to:fromClr;
+    var clr=fromClr;
+    if(segPairs&&segPairs[segIndex])clr=FloatingMonitor._mixCssColor(fromClr,toClr,localFrac);
 
-    var pluseHTML='';
-    // short trail dots following the line
-    for(var tr=0;tr<3;tr++){
-      var off=prog-(tr+1)*trailLen*0.8;
-      if(off<0)off+=pathLen;
-      var tp=pathEl.getPointAtLength(off);
-      var tr2=2.5-tr*0.5;
-      pluseHTML+='<circle cx="'+tp.x+'" cy="'+tp.y+'" r="'+tr2+'" fill="'+clr+'" opacity="'+(0.4-tr*0.1)+'"/>';
+    var strokeLen=pathLen*0.10;
+    var dashFrom=prog-strokeLen;
+    var head=svg.querySelector('#pulse-head');
+    var stroke=svg.querySelector('#pulse-stroke');
+    if(head){
+      head.setAttribute('d','M'+(pt.x-2)+','+pt.y+' L'+(pt.x+2)+','+pt.y);
+      head.setAttribute('stroke',clr);
+      head.setAttribute('stroke-width','3');
+      head.setAttribute('opacity','0.95');
     }
-    // small tight core
-    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="3.5" fill="'+clr+'" opacity="0.9"/>';
-    // thin glow ring
-    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="7" fill="none" stroke="'+clr+'" stroke-width="1.5" opacity="0.5"/>';
-    pulseGroup.innerHTML=pluseHTML;
+    if(stroke){
+      var tailFrom=Math.max(0,dashFrom);
+      var tailTo=prog;
+      var d='';
+      if(tailTo>tailFrom){
+        var pA=pathEl.getPointAtLength(tailFrom);
+        var pB=pathEl.getPointAtLength(tailTo);
+        d='M'+pA.x+','+pA.y+' L'+pB.x+','+pB.y;
+      }
+      stroke.setAttribute('d',d);
+      stroke.setAttribute('stroke',clr);
+      stroke.setAttribute('stroke-width','2.2');
+      stroke.setAttribute('opacity','0.55');
+    }
+    var ext=svg.querySelector('#pulse-trail1');
+    var ext2=svg.querySelector('#pulse-trail2');
+    if(ext){
+      var tOff=Math.max(0,dashFrom-pathLen*0.05);
+      if(tOff>=0&&tOff<pathLen){
+        var pC=pathEl.getPointAtLength(tOff);
+        var pD=pathEl.getPointAtLength(tailFrom);
+        ext.setAttribute('d','M'+pC.x+','+pC.y+' L'+pD.x+','+pD.y);
+        ext.setAttribute('stroke',clr);
+        ext.setAttribute('stroke-width','1.6');
+        ext.setAttribute('opacity','0.22');
+      }else{
+        ext.setAttribute('d','');
+      }
+    }
+    if(ext2){
+      var tOff2=Math.max(0,dashFrom-pathLen*0.10);
+      if(tOff2>=0&&tOff2<pathLen){
+        var pE=pathEl.getPointAtLength(tOff2);
+        var pF=pathEl.getPointAtLength(Math.max(0,dashFrom-pathLen*0.05));
+        ext2.setAttribute('d','M'+pE.x+','+pE.y+' L'+pF.x+','+pF.y);
+        ext2.setAttribute('stroke',clr);
+        ext2.setAttribute('stroke-width','1');
+        ext2.setAttribute('opacity','0.1');
+      }else{
+        ext2.setAttribute('d','');
+      }
+    }
+  },
+
+  _mixCssColor(c1,c2,t){
+    // Mix two CSS colors returning rgb() string. Continuous pulse color transition.
+    try{
+      var parse=function(c){
+        var wrap=document.createElement('div');wrap.style.color=c;document.body.appendChild(wrap);
+        var cs=getComputedStyle(wrap).color;wrap.remove();
+        var m=cs.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s\/]+([\d.]+))?\)/);
+        return m?{r:+m[1],g:+m[2],b:+m[3],a:m[4]!==undefined?+m[4]:1}:null;
+      };
+      var a=parse(c1),b2=parse(c2);
+      if(!a||!b2)return c1;
+      t=Math.max(0,Math.min(1,t));
+      var r=Math.round(a.r+(b2.r-a.r)*t),g=Math.round(a.g+(b2.g-a.g)*t),b=Math.round(a.b+(b2.b-a.b)*t);
+      return 'rgb('+r+','+g+','+b+')';
+    }catch(e){return c1;}
   },
 
   maybeStartAnim(){
@@ -1694,7 +1813,6 @@ drawWave(){
       if(e.button!==0)return;
       var r=self.host.getBoundingClientRect(),sx=e.clientX,sy=e.clientY;
       var moved=false;
-      try{target.setPointerCapture(e.pointerId)}catch{}
       function mv(ev){
         var dx=ev.clientX-sx,dy=ev.clientY-sy;
         if(!moved&&Math.hypot(dx,dy)<4)return;moved=true;
@@ -1704,11 +1822,14 @@ drawWave(){
         self.host.style.top=Math.max(4,Math.min(r.top+dy,mt))+'px';
       }
       function up(ev){
-        target.removeEventListener('pointermove',mv);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);
-        try{target.releasePointerCapture(ev.pointerId)}catch{}
-        if(moved){self._dragged=true;self.savePosition();setTimeout(function(){self._dragged=false},120)}
+        window.removeEventListener('pointermove',mv);
+        window.removeEventListener('pointerup',up);
+        window.removeEventListener('pointercancel',up);
+        if(moved){self._dragged=true;self.savePosition();setTimeout(function(){self._dragged=false},150);try{ev.preventDefault()}catch{}}
       }
-      target.addEventListener('pointermove',mv);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
+      window.addEventListener('pointermove',mv);
+      window.addEventListener('pointerup',up);
+      window.addEventListener('pointercancel',up);
     });
   }
 };
@@ -1724,18 +1845,18 @@ const Dashboard = {
     this.root.innerHTML=`<style>
       :host{all:initial}.overlay{position:fixed;inset:0;display:none;pointer-events:none;font-family:ui-rounded,"SF Pro Rounded","Segoe UI","Microsoft YaHei",sans-serif;color:var(--text)}.panel{position:fixed;left:0;top:0;width:680px;height:min(790px,calc(100vh - 48px));min-width:450px;min-height:350px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px);overflow:auto;resize:both;pointer-events:auto;box-sizing:border-box;background:var(--panel);border:1px solid var(--border);border-radius:22px;box-shadow:0 26px 75px var(--shadow);backdrop-filter:blur(18px) saturate(120%)}
       .head{position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;background:color-mix(in srgb,var(--panel) 94%,transparent);border-bottom:1px solid var(--border);cursor:move;user-select:none}.brand{display:flex;gap:10px;align-items:center}.brand-seal{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;background:color-mix(in srgb,var(--accent) 18%,var(--surface));color:var(--accent);font-weight:900}.brand b{display:block;font-size:15px}.brand small{display:block;color:var(--muted);font-size:10px;margin-top:2px}.head-actions{display:flex;gap:6px;cursor:default}.head-actions a{display:inline-flex;align-items:center;text-decoration:none}
-      button,select,input{font:inherit}.iconbtn,.tab,.btn{border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:10px;padding:7px 10px;font-size:11px;cursor:pointer}.iconbtn:hover,.tab:hover,.btn:hover{filter:brightness(1.05)}.tabs{position:sticky;top:59px;z-index:4;display:flex;gap:7px;padding:10px 15px;background:color-mix(in srgb,var(--panel) 95%,transparent);border-bottom:1px solid var(--border)}.tab.active{background:color-mix(in srgb,var(--accent) 18%,var(--surface));border-color:color-mix(in srgb,var(--accent) 45%,var(--border));color:var(--accent)}
-      .content{padding:16px 17px 20px}.pane{display:none}.pane.active{display:block}.section-title{font-size:12px;font-weight:800;letter-spacing:.02em;margin:14px 2px 8px}.kicker{font-size:10px;color:var(--muted);margin-bottom:8px}.card{border:1px solid var(--border);background:var(--surface);border-radius:17px;padding:13px;margin-bottom:11px;box-shadow:0 7px 22px color-mix(in srgb,var(--shadow) 28%,transparent)}.hero{padding:15px 16px}.card.status-normal{border-left:4px solid var(--normal)}.card.status-danger{border-left:4px solid var(--danger)}.card.status-conflict{border-left:4px solid var(--conflict)}.card.status-warn{border-left:4px solid var(--warn)}.card.status-unknown{border-left:4px solid var(--muted)}
-      .verdictline{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}.verdictwrap{display:flex;align-items:center;gap:6px;min-width:0}.verdict{font-size:12px;font-weight:850;padding:4px 9px;border-radius:999px;background:var(--surface2)}.tone-normal{color:var(--normal)}.tone-danger{color:var(--danger)}.tone-conflict{color:var(--conflict)}.tone-warn{color:var(--warn)}.tone-unknown{color:var(--muted)}.time{color:var(--muted);font-size:10px}.basis{font-size:11px;line-height:1.55;color:var(--muted);padding:8px 10px;border-radius:11px;background:var(--surface2);margin-bottom:10px}.metrics{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}.metric{font-size:9px;padding:3px 7px;border-radius:999px;background:color-mix(in srgb,var(--accent) 9%,var(--surface2));color:var(--muted);border:1px solid var(--border)}
-      .dialogue{display:grid;gap:9px}.chatrow{display:grid;grid-template-columns:28px minmax(0,1fr);gap:8px;align-items:start}.avatar{width:27px;height:27px;border-radius:10px;display:grid;place-items:center;font-size:10px;font-weight:850;border:1px solid var(--border);background:var(--surface2)}.bubble{padding:10px 12px;border-radius:14px;line-height:1.55;font-size:12px;border:1px solid color-mix(in srgb,var(--border) 75%,transparent)}.bubble.user{background:var(--user)}.bubble.assistant{background:var(--assistant)}.who{font-size:9px;color:var(--muted);margin-bottom:4px}.topic{font-weight:780;margin-bottom:3px}.preview{word-break:break-word}
-      .models{display:grid;grid-template-columns:minmax(0,1fr) 56px minmax(0,1fr);gap:8px;align-items:center;margin:12px 0;padding:12px;border-radius:15px;background:var(--surface2);border:1px solid var(--border)}.modelbox{min-width:0}.modellabel{display:flex;align-items:center;gap:4px;color:var(--muted);font-size:10px}.modelbox b{display:block;margin-top:4px;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.modelbox code{display:block;color:var(--muted);font-size:9px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.arrow{text-align:center;color:var(--accent);font-size:22px;filter:drop-shadow(0 0 7px color-mix(in srgb,var(--accent) 35%,transparent))}.resultcheck{font-size:10px;margin-top:4px;color:var(--muted)}
-      .info{appearance:none;border:0;background:transparent;color:var(--accent);padding:0 2px;cursor:pointer;font-size:11px;font-weight:900;text-decoration:none}.info:hover{transform:scale(1.12)}.network-chip{display:inline-flex;padding:3px 8px;border-radius:999px;background:color-mix(in srgb,var(--accent2) 12%,var(--surface2));color:var(--accent2);font-size:10px;border:1px solid color-mix(in srgb,var(--accent2) 24%,transparent)}
-      details{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}summary{cursor:pointer;color:var(--accent);font-size:11px}.tech{font:10px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;margin-top:7px}.empty{color:var(--muted);font-size:12px;padding:16px 3px}.muted{color:var(--muted);font-size:10px;line-height:1.55}
-      .statgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.stat{padding:10px;border-radius:13px;background:var(--surface2);text-align:center;border:1px solid var(--border)}.stat b{display:block;font-size:18px}.stat small{color:var(--muted);font-size:9px}.barrow{margin:9px 0}.barhead{display:flex;justify-content:space-between;font-size:11px}.bar{height:7px;background:var(--surface2);border-radius:999px;overflow:hidden;margin-top:4px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:999px}.splitgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.minirow{font-size:11px;color:var(--muted);line-height:1.55}.minirow b{color:var(--text)}
-      .field{display:grid;gap:5px;margin:10px 0}.field label{font-size:11px;color:var(--muted)}.field input[type=text],.field select,.select{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:10px;padding:8px 9px;outline:none}.setting-group{border:1px solid var(--border);background:var(--surface);border-radius:16px;padding:12px;margin-bottom:11px}.setting-group>h3{font-size:12px;margin:0 0 8px}.toggle{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 2px;border-bottom:1px solid var(--border);font-size:12px}.toggle:last-child{border-bottom:0}.subsetting{margin:5px 0 4px 17px;padding-left:10px;border-left:2px solid color-mix(in srgb,var(--accent) 35%,transparent)}.soundrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.range{width:100%;accent-color:var(--accent)}.theme-swatches{display:flex;gap:4px;margin-top:5px}.swatch{width:16px;height:8px;border-radius:999px;border:1px solid var(--border)}
-      .pow-wrap{overflow-x:auto;padding-bottom:6px}.pow-svg{display:block;min-height:270px}.pow-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.pow-stat{padding:12px 8px;border-radius:11px;background:var(--surface2);text-align:center;border:1px solid var(--border)}.pow-stat b{display:block;font-size:22px;font-weight:700;line-height:1.2}.pow-stat small{font-size:13px;font-weight:500;color:var(--muted)}
-      .pin-window{position:fixed;width:min(390px,calc(100vw - 28px));max-height:min(560px,calc(100vh - 28px));overflow:auto;pointer-events:auto;background:var(--panel);color:var(--text);border:1px solid color-mix(in srgb,var(--accent) 38%,var(--border));border-radius:17px;box-shadow:0 20px 60px var(--shadow);z-index:20}.pin-head{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;background:color-mix(in srgb,var(--panel) 96%,transparent);border-bottom:1px solid var(--border);cursor:move;user-select:none}.pin-head b{font-size:12px}.pin-actions{display:flex;gap:5px}.pin-actions button{padding:3px 7px}.pin-body{padding:12px}.pin-lead{font-size:12px;font-weight:750;line-height:1.6;padding:9px 10px;border-radius:11px;background:color-mix(in srgb,var(--accent) 10%,var(--surface));margin-bottom:11px}.pin-section{margin:10px 0}.pin-section b{display:block;font-size:11px;color:var(--accent);margin-bottom:3px}.pin-section p{margin:0;font-size:11px;line-height:1.65;color:var(--muted)}
-      .danger-text{color:var(--danger)!important}@media(max-width:720px){.panel{width:calc(100vw - 16px)!important;left:8px!important;resize:none}.statgrid,.splitgrid{grid-template-columns:1fr 1fr}.models{grid-template-columns:1fr 38px 1fr}.content{padding:12px}}
+      button,select,input{font:inherit}.iconbtn,.tab,.btn{border:1px solid var(--border);background:var(--surface);color:var(--text);border-radius:10px;padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer}.iconbtn:hover,.tab:hover,.btn:hover{filter:brightness(1.05)}.tabs{position:sticky;top:59px;z-index:4;display:flex;gap:8px;padding:10px 15px;background:color-mix(in srgb,var(--panel) 95%,transparent);border-bottom:1px solid var(--border)}.tab.active{background:color-mix(in srgb,var(--accent) 18%,var(--surface));border-color:color-mix(in srgb,var(--accent) 45%,var(--border));color:var(--accent)}
+      .content{padding:16px 17px 20px}.pane{display:none}.pane.active{display:block}.section-title{font-size:15px;font-weight:700;letter-spacing:.01em;margin:16px 2px 9px}.kicker{font-size:13px;color:var(--muted);margin-bottom:8px}.card{border:1px solid var(--border);background:var(--surface);border-radius:17px;padding:14px;margin-bottom:11px;box-shadow:0 7px 22px color-mix(in srgb,var(--shadow) 28%,transparent)}.hero{padding:15px 16px}.card.status-normal{border-left:4px solid var(--normal)}.card.status-danger{border-left:4px solid var(--danger)}.card.status-conflict{border-left:4px solid var(--conflict)}.card.status-warn{border-left:4px solid var(--warn)}.card.status-unknown{border-left:4px solid var(--muted)}
+      .verdictline{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}.verdictwrap{display:flex;align-items:center;gap:6px;min-width:0}.verdict{font-size:14px;font-weight:700;padding:4px 10px;border-radius:999px;background:var(--surface2)}.tone-normal{color:var(--normal)}.tone-danger{color:var(--danger)}.tone-conflict{color:var(--conflict)}.tone-warn{color:var(--warn)}.tone-unknown{color:var(--muted)}.time{color:var(--muted);font-size:12px}.basis{font-size:13px;line-height:1.55;color:var(--muted);padding:9px 11px;border-radius:11px;background:var(--surface2);margin-bottom:10px}.metrics{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}.metric{font-size:12px;padding:4px 8px;border-radius:999px;background:color-mix(in srgb,var(--accent) 9%,var(--surface2));color:var(--muted);border:1px solid var(--border)}
+      .dialogue{display:grid;gap:9px}.chatrow{display:grid;grid-template-columns:28px minmax(0,1fr);gap:8px;align-items:start}.avatar{width:28px;height:28px;border-radius:10px;display:grid;place-items:center;font-size:12px;font-weight:800;border:1px solid var(--border);background:var(--surface2)}.bubble{padding:11px 13px;border-radius:14px;line-height:1.55;font-size:14px;border:1px solid color-mix(in srgb,var(--border) 75%,transparent)}.bubble.user{background:var(--user)}.bubble.assistant{background:var(--assistant)}.who{font-size:11px;color:var(--muted);margin-bottom:4px}.topic{font-weight:780;margin-bottom:3px}.preview{word-break:break-word}
+      .models{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px;align-items:stretch;margin:12px 0;padding:14px 12px;border-radius:15px;background:var(--surface2);border:1px solid var(--border)}.modelbox{min-width:0;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center}.modellabel{display:flex;align-items:center;justify-content:center;gap:4px;color:var(--muted);font-size:13px;font-weight:600}.modelbox b{display:block;margin-top:5px;font-size:18px;font-weight:700;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.modelbox code{display:block;color:var(--muted);font-size:12px;margin-top:3px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.flow-mid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-width:64px}.arrow{text-align:center;color:var(--accent);font-size:20px;line-height:1;filter:drop-shadow(0 0 7px color-mix(in srgb,var(--accent) 35%,transparent))}.resultcheck{font-size:12px;font-weight:700;text-align:center;color:var(--muted)}
+      .info{appearance:none;border:0;background:transparent;color:var(--accent);padding:0 2px;cursor:pointer;font-size:12px;font-weight:900;text-decoration:none}.info:hover{transform:scale(1.12)}.network-chip{display:inline-flex;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--accent2) 12%,var(--surface2));color:var(--accent2);font-size:12px;border:1px solid color-mix(in srgb,var(--accent2) 24%,transparent)}
+      details{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}summary{cursor:pointer;color:var(--accent);font-size:13px}.tech{font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;margin-top:7px}.empty{color:var(--muted);font-size:13px;padding:16px 3px}.muted{color:var(--muted);font-size:13px;line-height:1.55}
+      .statgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.stat{padding:16px 10px;border-radius:13px;background:var(--surface2);text-align:center;border:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;gap:4px}.stat b{display:block;font-size:24px;font-weight:700;line-height:1.1}.stat small{color:var(--muted);font-size:13px;font-weight:500}.barrow{margin:10px 0}.barhead{display:flex;justify-content:space-between;font-size:13px}.bar{height:7px;background:var(--surface2);border-radius:999px;overflow:hidden;margin-top:4px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:999px}.splitgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.minirow{font-size:13px;color:var(--muted);line-height:1.55}.minirow b{color:var(--text)}
+      .field{display:grid;gap:5px;margin:10px 0}.field label{font-size:13px;color:var(--muted)}.field input[type=text],.field select,.select{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:10px;padding:9px 10px;outline:none;font-size:14px}.setting-group{border:1px solid var(--border);background:var(--surface);border-radius:16px;padding:13px;margin-bottom:11px}.setting-group>h3{font-size:15px;font-weight:700;margin:0 0 8px}.toggle{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 2px;border-bottom:1px solid var(--border);font-size:14px}.toggle:last-child{border-bottom:0}.subsetting{margin:5px 0 4px 17px;padding-left:10px;border-left:2px solid color-mix(in srgb,var(--accent) 35%,transparent)}.soundrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.range{width:100%;accent-color:var(--accent)}.theme-swatches{display:flex;gap:4px;margin-top:5px}.swatch{width:16px;height:8px;border-radius:999px;border:1px solid var(--border)}
+      .pow-wrap{overflow-x:auto;padding-bottom:6px}.pow-svg{display:block;min-height:270px}.pow-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.pow-stat{padding:14px 10px;border-radius:11px;background:var(--surface2);text-align:center;border:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;gap:5px}.pow-stat b{display:block;font-size:24px;font-weight:700;line-height:1.15}.pow-stat small{font-size:14px;font-weight:500;color:var(--muted)}
+      .pin-window{position:fixed;width:min(390px,calc(100vw - 28px));max-height:min(560px,calc(100vh - 28px));overflow:auto;pointer-events:auto;background:var(--panel);color:var(--text);border:1px solid color-mix(in srgb,var(--accent) 38%,var(--border));border-radius:17px;box-shadow:0 20px 60px var(--shadow);z-index:20}.pin-head{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;background:color-mix(in srgb,var(--panel) 96%,transparent);border-bottom:1px solid var(--border);cursor:move;user-select:none}.pin-head b{font-size:13px}.pin-actions{display:flex;gap:5px}.pin-actions button{padding:3px 7px}.pin-body{padding:12px}.pin-lead{font-size:13px;font-weight:750;line-height:1.6;padding:9px 10px;border-radius:11px;background:color-mix(in srgb,var(--accent) 10%,var(--surface));margin-bottom:11px}.pin-section{margin:10px 0}.pin-section b{display:block;font-size:13px;color:var(--accent);margin-bottom:3px}.pin-section p{margin:0;font-size:13px;line-height:1.65;color:var(--muted)}
+      .danger-text{color:var(--danger)!important}.ledger-item{border:1px solid var(--border);border-radius:11px;padding:9px 10px;margin:8px 0;background:var(--surface2)}.ledger-item.ledger-captured{border-left:3px solid var(--normal)}.ledger-item.ledger-missing{border-left:3px solid var(--warn)}.ledger-row{display:flex;gap:8px;align-items:flex-start}.ledger-icon{font-weight:900;line-height:1.3}.ledger-main b{font-size:14px}.ledger-value{font-size:13px;font-weight:600;margin-top:2px}.ledger-source{font-size:12px;color:var(--muted)}.ledger-explain{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.5}.ledger-missing-list{font-size:13px;color:var(--warn);margin-top:8px;font-weight:600}.ledger-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}.ledger-status{font-size:13px;font-weight:700;color:var(--accent)}.ledger-why{border-top:1px solid var(--border);margin-top:10px;padding-top:8px;font-size:13px;line-height:1.55}.ledger-why b{font-size:14px}@media(max-width:720px){.panel{width:calc(100vw - 16px)!important;left:8px!important;resize:none}.statgrid,.splitgrid{grid-template-columns:1fr 1fr}.models{grid-template-columns:1fr auto 1fr}.content{padding:12px}}
     </style><div class="overlay"><div class="panel"><div class="head" data-role="drag-handle"><div class="brand"><div class="brand-seal">鉴</div><div><b>模型鉴定姬</b><small>ChatGPT Model Downgrade Monitor</small></div></div><div class="head-actions"><a class="iconbtn" href="https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor" target="_blank" rel="noopener noreferrer" title="打开 GitHub 项目主页">GitHub ↗</a><button class="iconbtn" data-act="copy">复制诊断</button><button class="iconbtn" data-act="close">关闭</button></div></div><div class="tabs"><button class="tab" data-tab="current">当前</button><button class="tab" data-tab="archive">档案</button><button class="tab" data-tab="network">网络</button><button class="tab" data-tab="settings">设置</button></div><div class="content"><section class="pane" data-pane="current"></section><section class="pane" data-pane="archive"></section><section class="pane" data-pane="network"></section><section class="pane" data-pane="settings"></section></div></div></div>`;
     try{document.documentElement.appendChild(this.host)}catch{return this.root}this.applyTheme();this.bindShell();this.restoreGeometry();return this.root;
   },
@@ -1746,17 +1867,92 @@ const Dashboard = {
   restoreGeometry(force=false){const p=this.panel();if(!p)return;const st=loadSettings(),size=!force&&st.dashboardSize,pos=!force&&st.dashboardPosition,dw=Math.min(680,Math.max(470,window.innerWidth-48)),dh=Math.min(790,Math.max(430,window.innerHeight-72)),w=size&&Number.isFinite(size.width)?Math.min(Math.max(size.width,450),window.innerWidth-16):dw,h=size&&Number.isFinite(size.height)?Math.min(Math.max(size.height,350),window.innerHeight-16):dh;p.style.width=`${w}px`;p.style.height=`${h}px`;let l=pos&&Number.isFinite(pos.left)?pos.left:Math.max(16,window.innerWidth-w-24),t=pos&&Number.isFinite(pos.top)?pos.top:56;l=Math.max(8,Math.min(l,window.innerWidth-w-8));t=Math.max(8,Math.min(t,window.innerHeight-Math.min(h,80)-8));p.style.left=`${l}px`;p.style.top=`${t}px`},
   saveGeometry(){const p=this.panel();if(!p||window.innerWidth<=700)return;const r=p.getBoundingClientRect(),st=loadSettings();st.dashboardPosition={left:Math.round(r.left),top:Math.round(r.top)};st.dashboardSize={width:Math.round(r.width),height:Math.round(r.height)};saveSettings(st)},
   show(){const r=this.ensure();this.open=true;const o=r.querySelector('.overlay');if(o)o.style.display='block';this.applyTheme();this.render()},hide(){if(!this.root)return;this.open=false;const o=this.root.querySelector('.overlay');if(o)o.style.display='none'},toggle(){this.open?this.hide():this.show()},
-  openConcept(key,anchor){const data=CONCEPTS[key];if(!data||!this.root)return;const existing=this.openPins.get(key);if(existing&&existing.isConnected){existing.style.display='block';existing.focus();return}const win=document.createElement('div');win.className='pin-window';win.dataset.conceptKey=key;win.tabIndex=-1;applyThemeVars(win);const sections=data.sections.map(([h,t])=>`<div class="pin-section"><b>${escapeHtml(h)}</b><p>${escapeHtml(t)}</p></div>`).join('');win.innerHTML=`<div class="pin-head"><b>📌 ${escapeHtml(data.title)}</b><div class="pin-actions"><button class="iconbtn" data-pin-act="keep" title="固定这张解释卡">固定</button><button class="iconbtn" data-pin-act="close">×</button></div></div><div class="pin-body"><div class="pin-lead">${escapeHtml(data.lead)}</div>${sections}</div>`;this.root.querySelector('.overlay').appendChild(win);const st=loadSettings(),saved=st.conceptPinPositions&&st.conceptPinPositions[key];let left=saved&&Number.isFinite(saved.left)?saved.left:Math.min(window.innerWidth-410,Math.max(18,(anchor&&anchor.getBoundingClientRect().right+12)||80));let top=saved&&Number.isFinite(saved.top)?saved.top:Math.min(window.innerHeight-300,Math.max(18,(anchor&&anchor.getBoundingClientRect().top-20)||100));win.style.left=`${Math.max(8,left)}px`;win.style.top=`${Math.max(8,top)}px`;win.dataset.pinned=saved?'1':'0';this.openPins.set(key,win);this.installPinDrag(win,key);win.querySelector('[data-pin-act="close"]').addEventListener('click',()=>{this.openPins.delete(key);win.remove()});win.querySelector('[data-pin-act="keep"]').addEventListener('click',e=>{win.dataset.pinned='1';e.currentTarget.textContent='已固定';this.savePinPosition(win,key)});
+  openConcept(key,anchor){if(key==='completeness'){this.openEvidenceLedger(anchor);return}const data=CONCEPTS[key];if(!data||!this.root)return;const existing=this.openPins.get(key);if(existing&&existing.isConnected){existing.style.display='block';existing.focus();return}const win=document.createElement('div');win.className='pin-window';win.dataset.conceptKey=key;win.tabIndex=-1;applyThemeVars(win);const sections=data.sections.map(([h,t])=>`<div class="pin-section"><b>${escapeHtml(h)}</b><p>${escapeHtml(t)}</p></div>`).join('');win.innerHTML=`<div class="pin-head"><b>📌 ${escapeHtml(data.title)}</b><div class="pin-actions"><button class="iconbtn" data-pin-act="keep" title="固定这张解释卡">固定</button><button class="iconbtn" data-pin-act="close">×</button></div></div><div class="pin-body"><div class="pin-lead">${escapeHtml(data.lead)}</div>${sections}</div>`;this.root.querySelector('.overlay').appendChild(win);const st=loadSettings(),saved=st.conceptPinPositions&&st.conceptPinPositions[key];let left=saved&&Number.isFinite(saved.left)?saved.left:Math.min(window.innerWidth-410,Math.max(18,(anchor&&anchor.getBoundingClientRect().right+12)||80));let top=saved&&Number.isFinite(saved.top)?saved.top:Math.min(window.innerHeight-300,Math.max(18,(anchor&&anchor.getBoundingClientRect().top-20)||100));win.style.left=`${Math.max(8,left)}px`;win.style.top=`${Math.max(8,top)}px`;win.dataset.pinned=saved?'1':'0';this.openPins.set(key,win);this.installPinDrag(win,key);win.querySelector('[data-pin-act="close"]').addEventListener('click',()=>{this.openPins.delete(key);win.remove()});win.querySelector('[data-pin-act="keep"]').addEventListener('click',e=>{win.dataset.pinned='1';e.currentTarget.textContent='已固定';this.savePinPosition(win,key)});
     // Only one unpinned explainer at a time; fixed cards can remain together.
     for(const [k,w] of this.openPins){if(k!==key&&w.dataset.pinned!=="1"){this.openPins.delete(k);w.remove()}}
   },
   installPinDrag(win,key){const head=win.querySelector('.pin-head');head.addEventListener('pointerdown',e=>{if(e.button!==0||e.target.closest('button'))return;const r=win.getBoundingClientRect(),sx=e.clientX,sy=e.clientY;try{head.setPointerCapture(e.pointerId)}catch{}const mv=ev=>{const ml=Math.max(8,window.innerWidth-r.width-8),mt=Math.max(8,window.innerHeight-50);win.style.left=`${Math.max(8,Math.min(r.left+ev.clientX-sx,ml))}px`;win.style.top=`${Math.max(8,Math.min(r.top+ev.clientY-sy,mt))}px`};const up=ev=>{head.removeEventListener('pointermove',mv);head.removeEventListener('pointerup',up);head.removeEventListener('pointercancel',up);try{head.releasePointerCapture(ev.pointerId)}catch{}this.savePinPosition(win,key)};head.addEventListener('pointermove',mv);head.addEventListener('pointerup',up);head.addEventListener('pointercancel',up)})},
   savePinPosition(win,key){const r=win.getBoundingClientRect(),st=loadSettings();st.conceptPinPositions={...(st.conceptPinPositions||{}),[key]:{left:Math.round(r.left),top:Math.round(r.top)}};saveSettings(st)},
+  evidenceLedgerHTML(turn){
+    if(!turn)return '<div class="muted">还没有正在进行的这一轮。发送一条消息后，这里会实时显示证据采集状态。</div>';
+    const isFinalized=turn.lifecycle===LIFECYCLE.FINALIZED;
+    const isCollecting=!isFinalized;
+    const items=[
+      {key:"requested",label:"调用模型",value:turn.requestedModel,source:"conversation request",explain:"网页发送这条消息时，请求服务器使用的模型。"},
+      {key:"resolved",label:"服务器确认模型",value:turn.resolvedModel,source:"resolved_model_slug",explain:"服务器返回的数据里用于记录本次请求最终解析到哪个模型的字段。"},
+      {key:"server",label:"服务器路由",value:turn.serverModel,source:"server_ste_metadata",explain:"服务器响应中可能出现的额外路由模型信息。"},
+      {key:"assistant",label:"应答模型",value:turn.assistantModel,source:"assistant metadata",explain:"最终显示给你的这条 ChatGPT 回答自己携带的模型标记。"}
+    ];
+    const allCaptured=items.filter(x=>x.value).length;
+    const coreCaptured=(turn.requestedModel?1:0)+(turn.assistantModel?1:0);
+    const statusText=isCollecting?`证据采集中 · ${allCaptured} / 4`:`证据完整度 ${allCaptured} / 4`;
+    const rows=items.map(function(it){
+      var icon=it.value?'✓':'…';
+      var cls=it.value?'ledger-captured':'ledger-missing';
+      var valText=it.value?friendlyModelName(it.value):(isCollecting?'正在等待响应证据':'未捕获');
+      return '<div class="ledger-item '+cls+'"><div class="ledger-row"><span class="ledger-icon">'+icon+'</span><div class="ledger-main"><b>'+escapeHtml(it.label)+'</b><div class="ledger-value">'+escapeHtml(valText)+'</div><div class="ledger-source">'+escapeHtml(it.source)+'</div></div></div><div class="ledger-explain">'+escapeHtml(it.explain)+'</div></div>';
+    }).join('');
+    var missing='';
+    if(isFinalized){
+      var miss=items.filter(x=>!x.value).map(x=>x.label);
+      if(miss.length)missing='<div class="ledger-missing-list">未捕获：'+escapeHtml(miss.join('、'))+'</div>';
+    }
+    var why='';
+    if(isFinalized){
+      why='<div class="ledger-why"><b>为什么出现这个结论？</b>';
+      if(turn.requestedModel&&turn.assistantModel){
+        why+='<div>调用模型：'+escapeHtml(friendlyModelName(turn.requestedModel))+'</div><div>应答模型：'+escapeHtml(friendlyModelName(turn.assistantModel))+'</div>';
+        if(turn.requestedModel!==turn.assistantModel){
+          why+='<div class="tone-danger">→ 两者不同，因此标记：请求与应答模型不一致</div>';
+        }else{
+          why+='<div class="tone-normal">→ 两者一致，核心证据匹配</div>';
+        }
+      }
+      if(turn.resolvedModel||turn.serverModel){
+        why+='<div style="margin-top:4px">服务器确认：'+escapeHtml(turn.resolvedModel?friendlyModelName(turn.resolvedModel):'未捕获')+'</div><div>服务器路由：'+escapeHtml(turn.serverModel?friendlyModelName(turn.serverModel):'未捕获')+'</div>';
+        var rf=[turn.resolvedModel,turn.serverModel].filter(Boolean);
+        if(rf.length>=1&&turn.assistantModel&&rf.some(function(x){return x!==turn.assistantModel;}))why+='<div class="tone-conflict">→ 服务器侧证据与应答不一致，附加：路由证据冲突</div>';
+      }
+      why+='</div>';
+    }
+    return '<div class="ledger-head"><b>📌 本轮证据</b><span class="ledger-status">'+escapeHtml(statusText)+'</span></div><div class="ledger-items">'+rows+'</div>'+missing+why+'<div class="muted" style="margin-top:6px">核心证据 '+(coreCaptured)+'/2 · 全部模型证据 '+allCaptured+'/4</div>';
+  },
+  openEvidenceLedger(anchor){
+    if(!this.root)return;
+    var key='__live_ledger';
+    var existing=this.openPins.get(key);
+    if(existing&&existing.isConnected){existing.style.display='block';this.refreshEvidenceLedger(existing);existing.focus();return;}
+    var win=document.createElement('div');win.className='pin-window evidence-ledger';win.dataset.conceptKey=key;win.tabIndex=-1;applyThemeVars(win);
+    win.innerHTML='<div class="pin-head"><b>📌 本轮证据</b><div class="pin-actions"><button class="iconbtn" data-pin-act="close">×</button></div></div><div class="pin-body" data-role="ledger-body"></div>';
+    this.root.querySelector('.overlay').appendChild(win);
+    var left=Math.min(window.innerWidth-410,Math.max(18,(anchor&&anchor.getBoundingClientRect().right+12)||80));
+    var top=Math.min(window.innerHeight-300,Math.max(18,(anchor&&anchor.getBoundingClientRect().top-20)||100));
+    win.style.left=Math.max(8,left)+'px';win.style.top=Math.max(8,top)+'px';
+    this.openPins.set(key,win);
+    this.installPinDrag(win,key);
+    win.querySelector('[data-pin-act="close"]').addEventListener('click',function(){this.openPins.delete(key);win.remove();}.bind(this));
+    this.refreshEvidenceLedger(win);
+  },
+  refreshEvidenceLedger(win){
+    if(!win||!win.isConnected)return;
+    var body=win.querySelector('[data-role="ledger-body"]');
+    if(!body)return;
+    var turn=TurnAggregator.getActiveTurn()||State._last;
+    body.innerHTML=this.evidenceLedgerHTML(turn);
+    // Live update while the panel is open
+    var self=this;
+    if(this._ledgerTimer)clearInterval(this._ledgerTimer);
+    this._ledgerTimer=setInterval(function(){
+      if(!win.isConnected){clearInterval(self._ledgerTimer);self._ledgerTimer=null;return;}
+      var t2=TurnAggregator.getActiveTurn()||State._last;
+      body.innerHTML=self.evidenceLedgerHTML(t2);
+    },1200);
+  },
   render(){try{const r=this.ensure();if(!r)return;this.applyTheme();r.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===this.activeTab));r.querySelectorAll('.pane').forEach(p=>p.classList.toggle('active',p.dataset.pane===this.activeTab));this.renderCurrent(r.querySelector('[data-pane="current"]'));this.renderArchive(r.querySelector('[data-pane="archive"]'));this.renderNetwork(r.querySelector('[data-pane="network"]'));this.renderSettings(r.querySelector('[data-pane="settings"]'))}catch(e){try{console.warn('[Model Downgrade Monitor] render failed',e)}catch{}}},
   routeCard(entry,compact=false){
     if(!entry)return '<div class="empty">还没有捕获到模型应答。发送一条消息后，这里会出现“调用模型 → 应答模型”。</div>';
     const st=statusInfo(entry),call=entry.requestedModel,answer=entry.assistantModel||null,topic=entry.promptTopic||entry.replyTopic||'本轮对话',network=entry.networkLabel||'未命名网络';const prompt=entry.promptPreview||'（这条旧记录没有保存对话摘要）',reply=entry.replyPreview||'（尚未提取到回复摘要）';const tech=JSON.stringify({...entry,promptPreview:undefined,promptTopic:undefined,replyPreview:undefined,replyTopic:undefined},null,2);const resultMark=st.tone==='normal'?'✓':st.tone==='danger'?'≠':st.tone==='conflict'?'◇':st.tone==='warn'?'△':'?';
-    return `<div class="card ${compact?'archive-card':'hero'} status-${st.tone}"><div class="verdictline"><div class="verdictwrap"><span class="verdict tone-${st.tone}">${escapeHtml(resultMark+' '+st.title)}</span>${conceptButton(st.tone==='conflict'?'conflict':'status')}</div><span class="time">${escapeHtml(new Date(entry.timestamp).toLocaleTimeString())}</span></div><div class="basis">${escapeHtml(st.basis)}<div class="metrics">${st.metrics.map(x=>`<span class="metric">${escapeHtml(x)}</span>`).join('')}${conceptButton('completeness')}</div></div><div class="dialogue"><div class="chatrow"><div class="avatar">你</div><div class="bubble user"><div class="who">你问 · ${escapeHtml(topic)}</div><div class="preview">${escapeHtml(prompt)}</div></div></div><div class="models"><div class="modelbox"><div class="modellabel">调用模型 ${conceptButton('requested')}</div><b>${escapeHtml(friendlyModelName(call))}</b><code>${escapeHtml(call||'未捕获')}</code></div><div class="arrow">→</div><div class="modelbox"><div class="modellabel">应答模型 ${conceptButton('assistant')}</div><b>${escapeHtml(friendlyModelName(answer))}</b><code>${escapeHtml(answer||'未捕获')}</code><div class="resultcheck">${escapeHtml(st.title)}</div></div></div><div class="chatrow"><div class="avatar">AI</div><div class="bubble assistant"><div class="who">ChatGPT 回答${entry.replyIsCode?' · 代码回答':''}</div><div class="preview">${escapeHtml(reply)}</div></div></div></div><div style="margin-top:10px"><span class="network-chip">${escapeHtml(network)}</span></div><details><summary>技术证据</summary><div class="minirow" style="margin-top:8px">服务器确认模型 ${conceptButton('resolved')}：<b>${escapeHtml(friendlyModelName(entry.resolvedModel))}</b> · ${escapeHtml(entry.resolvedSource||'未捕获')}</div><div class="minirow">服务器路由 ${conceptButton('server')}：<b>${escapeHtml(friendlyModelName(entry.serverModel))}</b> · ${escapeHtml(entry.serverSource||'未捕获')}</div><div class="tech">${escapeHtml(tech)}</div>${Array.isArray(entry.internalMessages)&&entry.internalMessages.length?`<div class="tech">内部 message (${entry.internalMessages.length}):\n${escapeHtml(JSON.stringify(entry.internalMessages,null,2))}</div>`:''}</details></div>`;
+    return `<div class="card ${compact?'archive-card':'hero'} status-${st.tone}"><div class="verdictline"><div class="verdictwrap"><span class="verdict tone-${st.tone}">${escapeHtml(resultMark+' '+st.title)}</span>${conceptButton(st.tone==='conflict'?'conflict':'status')}</div><span class="time">${escapeHtml(new Date(entry.timestamp).toLocaleTimeString())}</span></div><div class="basis">${escapeHtml(st.basis)}<div class="metrics">${st.metrics.map(x=>`<span class="metric">${escapeHtml(x)}</span>`).join('')}${conceptButton('completeness')}</div></div><div class="dialogue"><div class="chatrow"><div class="avatar">你</div><div class="bubble user"><div class="who">你问 · ${escapeHtml(topic)}</div><div class="preview">${escapeHtml(prompt)}</div></div></div><div class="models"><div class="modelbox"><div class="modellabel">调用模型 ${conceptButton('requested')}</div><b>${escapeHtml(friendlyModelName(call))}</b><code>${escapeHtml(call||'未捕获')}</code></div><div class="flow-mid"><div class="arrow">→</div><div class="resultcheck">${escapeHtml(resultMark+' '+st.title)}</div></div><div class="modelbox"><div class="modellabel">应答模型 ${conceptButton('assistant')}</div><b>${escapeHtml(friendlyModelName(answer))}</b><code>${escapeHtml(answer||'未捕获')}</code></div></div><div class="chatrow"><div class="avatar">AI</div><div class="bubble assistant"><div class="who">ChatGPT 回答${entry.replyIsCode?' · 代码回答':''}</div><div class="preview">${escapeHtml(reply)}</div></div></div></div><div style="margin-top:10px"><span class="network-chip">${escapeHtml(network)}</span></div><details><summary>技术证据</summary><div class="minirow" style="margin-top:8px">服务器确认模型 ${conceptButton('resolved')}：<b>${escapeHtml(friendlyModelName(entry.resolvedModel))}</b> · ${escapeHtml(entry.resolvedSource||'未捕获')}</div><div class="minirow">服务器路由 ${conceptButton('server')}：<b>${escapeHtml(friendlyModelName(entry.serverModel))}</b> · ${escapeHtml(entry.serverSource||'未捕获')}</div><div class="tech">${escapeHtml(tech)}</div>${Array.isArray(entry.internalMessages)&&entry.internalMessages.length?`<div class="tech">内部 message (${entry.internalMessages.length}):\n${escapeHtml(JSON.stringify(entry.internalMessages,null,2))}</div>`:''}</details></div>`;
   },
   renderCurrent(el){if(!el)return;const h=State.hookHealth(),last=State.lastRouteResult();el.innerHTML=`<div class="kicker">${last?'本轮鉴定':'等待应答'} · 捕获器 ${zhHook(h.overall)}</div>${this.routeCard(last,false)}<div class="muted">主界面只保留“这轮对话 / 调用了什么 / 什么模型回答 / 是否一致 / 当前网络”。服务器字段与其他技术项放在“技术证据”里。</div>`},
   renderArchive(el){
@@ -1766,11 +1962,20 @@ const Dashboard = {
   },
 powChart(samples){
     var finalized=TurnAggregator.finalized;
-    var powToTurn={};
-    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.powDecimal)powToTurn[ft.powDecimal]=ft;}
+    var turnById={};
+    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.turnId)turnById[ft.turnId]=ft;}
     var pts=[];for(var i=0;i<samples.length;i++){
       var x=samples[i];var work=estimatePowWork(x.rawHex);if(!Number.isFinite(work))continue;
-      var assoc=powToTurn[x.decimal]||null;
+      // TurnId-first association; powDecimal is only a fallback, never the sole key.
+      var assoc=null;
+      if(x.turnId&&turnById[x.turnId])assoc=turnById[x.turnId];
+      else if(x.turnId){for(var fj=finalized.length-1;fj>=0;fj--){if(finalized[fj].turnId===x.turnId){assoc=finalized[fj];break;}}}
+      if(!assoc){
+        for(var fk=finalized.length-1;fk>=0;fk--){
+          var ff=finalized[fk];
+          if(ff.powDecimal===x.decimal&&x.decimal&&x.decimal!=='undefined'&&Number(x.decimal)>0){assoc=ff;break;}
+        }
+      }
       pts.push({raw:x.rawHex||'',rawDecimal:Number(x.decimal),work:work,t:x.observedAt?new Date(x.observedAt):null,label:x.networkLabel||'',verdict:assoc?assoc.primaryVerdict:null,turn:assoc});
     }pts.reverse();
     if(pts.length<2)return '<div class="empty">PoW 样本不足，暂时无法画估算工作量趋势。</div>';
@@ -1781,15 +1986,17 @@ powChart(samples){
     for(var ti=0;ti<ticks;ti++){var val=max-(span*ti/(ticks-1)),yy=yFn(val);grid+='<line x1="'+l+'" y1="'+yy+'" x2="'+(w-r)+'" y2="'+yy+'" stroke="var(--border)" stroke-width="1"/><text x="'+(l-9)+'" y="'+(yy+4)+'" text-anchor="end" fill="var(--muted)" font-size="12">'+fmtWork(val)+'</text>';}
     var line=pts.map(function(p,i){return xFn(i)+','+yFn(p.work);}).join(' ');
     var circles='';
-    for(var ci=0;ci<pts.length;ci++){var p=pts[ci],xx=xFn(ci),yy2=yFn(p.work),time=p.t&&!Number.isNaN(p.t)?p.t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'#'+(ci+1);
+    var tooltipData=[];
+    for(var ci=0;ci<pts.length;ci++){
+      var p=pts[ci],xx=xFn(ci),yy2=yFn(p.work),time=p.t&&!Number.isNaN(p.t)?p.t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'#'+(ci+1);
       var fill='var(--muted)',stroke='var(--panel)';
       if(p.verdict===VERDICT.NORMAL){fill='var(--normal)';}
       else if(p.verdict===VERDICT.MODEL_MISMATCH||p.verdict===VERDICT.DOWNGRADE_SUSPECTED){fill='var(--danger)';if(p.turn&&p.turn.findings&&p.turn.findings.indexOf('ROUTE_EVIDENCE_CONFLICT')>=0)stroke='var(--conflict)';}
       else if(p.verdict===VERDICT.EVIDENCE_CONFLICT){fill='var(--conflict)';}
       else if(p.verdict===VERDICT.ROUTE_NOTICE||p.verdict===VERDICT.UNKNOWN){fill='var(--warn)';}
-      var tooltip=escapeHtml(time+' · 估算工作量 '+fmtWork(p.work)+' · raw '+p.rawDecimal.toLocaleString());if(p.label)tooltip+=' · '+escapeHtml(p.label);
+      tooltipData.push({idx:ci,pt:p});
       var showLabel=n<=20||ci%Math.ceil(n/20)===0;
-      circles+='<circle cx="'+xx+'" cy="'+yy2+'" r="5" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"><title>'+tooltip+'</title></circle>';
+      circles+='<circle data-pow-idx="'+ci+'" cx="'+xx+'" cy="'+yy2+'" r="5.5" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"/>';
       if(showLabel){circles+='<text x="'+xx+'" y="'+Math.max(14,yy2-10)+'" text-anchor="middle" fill="var(--text)" font-size="12">'+fmtWork(p.work)+'</text><text x="'+xx+'" y="'+(h-18)+'" text-anchor="middle" fill="var(--muted)" font-size="12">'+escapeHtml(time)+'</text>';}
     }
     var legend='<div class="pow-legend" style="display:flex;gap:12px;flex-wrap:wrap;margin:6px 0;font-size:12px">';
@@ -1799,11 +2006,91 @@ powChart(samples){
     legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--warn)"></span> 黄色 · 证据未完整</span>';
     legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted)"></span> 灰色 · 未关联模型记录</span>';
     legend+='</div>';
-    return '<div class="pow-wrap">'+legend+'<svg class="pow-svg" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" aria-label="PoW estimated work trend">'+grid+'<line x1="'+l+'" y1="'+(h-b)+'" x2="'+(w-r)+'" y2="'+(h-b)+'" stroke="var(--muted)"/><line x1="'+l+'" y1="'+tt+'" x2="'+l+'" y2="'+(h-b)+'" stroke="var(--muted)"/><text x="12" y="17" fill="var(--muted)" font-size="13">估算工作量（期望尝试次数）</text><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="'+line+'"/>'+circles+'</svg></div><div class="muted">Y 轴越高 = 按公开逆向算法估算，需要的尝试次数越多。点位悬停可看原始 difficulty 十进制/十六进制值；这是逆向估算，不是 OpenAI 官方"风控分"。</div>';
+    return '<div class="pow-wrap">'+legend+'<div class="pow-svg-wrap" style="position:relative"><svg class="pow-svg" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" aria-label="PoW estimated work trend">'+grid+'<line x1="'+l+'" y1="'+(h-b)+'" x2="'+(w-r)+'" y2="'+(h-b)+'" stroke="var(--muted)"/><line x1="'+l+'" y1="'+tt+'" x2="'+l+'" y2="'+(h-b)+'" stroke="var(--muted)"/><text x="12" y="17" fill="var(--muted)" font-size="13">估算工作量（期望尝试次数）</text><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="'+line+'"/>'+circles+'</svg><div class="pow-tooltip" data-role="pow-tooltip" style="display:none;position:absolute;z-index:6;pointer-events:none;max-width:300px"></div></div></div><div class="muted">Y 轴越高 = 按公开逆向算法估算，需要的尝试次数越多。点位悬停可看该轮模型状态；这是逆向估算，不是 OpenAI 官方"风控分"。</div>';
   },
   renderNetwork(el){
     if(!el)return;const st=loadSettings(),hist=State.historyForUi(),groups=new Map();for(const x of hist){const k=x.networkLabel||'未命名网络',g=groups.get(k)||{n:0,mismatch:0,conflict:0,pow:[]};g.n++;if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED)g.mismatch++;if(x.verdict===VERDICT.EVIDENCE_CONFLICT)g.conflict++;const p=Number(x.powDecimal);if(Number.isFinite(p))g.pow.push(p);groups.set(k,g)}const rows=[...groups.entries()].map(([k,g])=>`<div class="card"><b>${escapeHtml(k)}</b><div class="minirow">应答 ${g.n} 次 · 请求≠应答 ${g.mismatch} · 路由冲突 ${g.conflict} · 平均 PoW ${g.pow.length?Math.round(g.pow.reduce((a,b)=>a+b,0)/g.pow.length).toLocaleString():'—'}</div></div>`).join('');const snap=currentNetworkSnapshot(),pow=loadPowHistory().slice(0,50),nums=pow.map(x=>Number(x.decimal)).filter(Number.isFinite),works=pow.map(x=>estimatePowWork(x.rawHex)).filter(Number.isFinite),sortedWork=[...works].sort((a,b)=>a-b),medianWork=sortedWork.length?sortedWork[Math.floor(sortedWork.length/2)]:null,avgWork=works.length?works.reduce((a,b)=>a+b,0)/works.length:null,latest=pow[0]||null;const c=snap.connection||{},fmtWork=v=>!Number.isFinite(v)?'—':v>=1000?`${(v/1000).toFixed(v>=10000?0:1)}k×`:v>=100?`${v.toFixed(0)}×`:v>=10?`${v.toFixed(1)}×`:`${v.toFixed(2)}×`;
-    el.innerHTML=`<div class="section-title">当前网络</div><div class="card"><div class="field"><label>节点 / 网络名称（手动命名）</label><input type="text" data-role="network-label" value="${escapeHtml(st.networkLabel||'未命名网络')}" maxlength="64"></div><button class="btn" data-act="save-network">保存标签</button><div class="muted" style="margin-top:8px">浏览器无法可靠读取 OpenClash 当前节点名，所以这里使用你自己定义的标签；之后每轮鉴定都会自动带上它。</div>${snap.connection?`<div class="splitgrid" style="margin-top:10px"><div class="minirow">浏览器网络延迟 ${conceptButton('rtt')}<br><b>${Number.isFinite(c.rtt)?c.rtt+' ms':'—'}</b></div><div class="minirow">浏览器下行估算 ${conceptButton('downlink')}<br><b>${Number.isFinite(c.downlink)?c.downlink+' Mbps':'—'}</b></div></div>`:''}</div><div class="section-title">PoW 分析 ${conceptButton('pow')}</div><div class="card"><div class="pow-summary"><div class="pow-stat"><b>${pow.length}</b><small>样本</small></div><div class="pow-stat"><b>${fmtWork(avgWork)}</b><small>平均估算工作量</small></div><div class="pow-stat"><b>${fmtWork(medianWork)}</b><small>中位估算工作量</small></div><div class="pow-stat"><b>${latest&&latest.decimal?Number(latest.decimal).toLocaleString():'—'}</b><small>最新 raw 阈值</small></div></div><button class="btn" data-act="pow-toggle">${this.powExpanded?'收起':'展开'} PoW 趋势图</button>${this.powExpanded?this.powChart(pow):'<div class="muted" style="margin-top:8px">默认折叠。点 PoW ⓘ 可以看“为什么平台使用它、数字大小怎么读、为什么不能把它当 IP 质量分”。</div>'}</div><div class="section-title">按网络标签统计</div>${rows||'<div class="empty">暂无网络统计。</div>'}`;const save=el.querySelector('[data-act="save-network"]');if(save)save.addEventListener('click',()=>{const input=el.querySelector('[data-role="network-label"]'),s=loadSettings();s.networkLabel=(input.value||'未命名网络').trim().slice(0,64)||'未命名网络';saveSettings(s);save.textContent='已保存';setTimeout(()=>this.render(),450)});const pt=el.querySelector('[data-act="pow-toggle"]');if(pt)pt.addEventListener('click',()=>{this.powExpanded=!this.powExpanded;this.render()})
+    el.innerHTML=`<div class="section-title">当前网络</div><div class="card"><div class="field"><label>节点 / 网络名称（手动命名）</label><input type="text" data-role="network-label" value="${escapeHtml(st.networkLabel||'未命名网络')}" maxlength="64"></div><button class="btn" data-act="save-network">保存标签</button><div class="muted" style="margin-top:8px">浏览器无法可靠读取 OpenClash 当前节点名，所以这里使用你自己定义的标签；之后每轮鉴定都会自动带上它。</div>${snap.connection?`<div class="splitgrid" style="margin-top:10px"><div class="minirow">浏览器网络延迟 ${conceptButton('rtt')}<br><b>${Number.isFinite(c.rtt)?c.rtt+' ms':'—'}</b></div><div class="minirow">浏览器下行估算 ${conceptButton('downlink')}<br><b>${Number.isFinite(c.downlink)?c.downlink+' Mbps':'—'}</b></div></div>`:''}</div><div class="section-title">PoW 分析 ${conceptButton('pow')}</div><div class="card"><div class="pow-summary"><div class="pow-stat"><b>${pow.length}</b><small>样本</small></div><div class="pow-stat"><b>${fmtWork(avgWork)}</b><small>平均估算工作量</small></div><div class="pow-stat"><b>${fmtWork(medianWork)}</b><small>中位估算工作量</small></div><div class="pow-stat"><b>${latest&&latest.decimal?Number(latest.decimal).toLocaleString():'—'}</b><small>最新 raw 阈值</small></div></div><button class="btn" data-act="pow-toggle">${this.powExpanded?'收起':'展开'} PoW 趋势图</button>${this.powExpanded?this.powChart(pow):'<div class="muted" style="margin-top:8px">默认折叠。点 PoW ⓘ 可以看“为什么平台使用它、数字大小怎么读、为什么不能把它当 IP 质量分”。</div>'}</div><div class="section-title">按网络标签统计</div>${rows||'<div class="empty">暂无网络统计。</div>'}`;const save=el.querySelector('[data-act="save-network"]');if(save)save.addEventListener('click',()=>{const input=el.querySelector('[data-role="network-label"]'),s=loadSettings();s.networkLabel=(input.value||'未命名网络').trim().slice(0,64)||'未命名网络';saveSettings(s);save.textContent='已保存';setTimeout(()=>this.render(),450)});const pt=el.querySelector('[data-act="pow-toggle"]');if(pt)pt.addEventListener('click',()=>{this.powExpanded=!this.powExpanded;this.render()});this.wirePowTooltip(el)
+  },
+  wirePowTooltip(el){
+    var self=this;
+    var svg=el.querySelector('.pow-svg');if(!svg)return;
+    var tip=el.querySelector('[data-role="pow-tooltip"]');
+    var finalized=TurnAggregator.finalized;
+    var turnById={};
+    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.turnId)turnById[ft.turnId]=ft;}
+    var samples=loadPowHistory().slice(0,50);
+    function sampleForIdx(idx){
+      var work=0,arr=[];
+      for(var i=0;i<samples.length;i++){
+        var x=samples[i];var w=estimatePowWork(x.rawHex);if(!Number.isFinite(w))continue;
+        arr.push(x);work=w;if(arr.length>=50)break;
+      }
+      arr.reverse();
+      return arr[idx]||null;
+    }
+    function findTurn(sample){
+      if(!sample)return null;
+      if(sample.turnId&&turnById[sample.turnId])return turnById[sample.turnId];
+      if(sample.turnId){for(var k=finalized.length-1;k>=0;k--){if(finalized[k].turnId===sample.turnId)return finalized[k];}}
+      for(var k2=finalized.length-1;k2>=0;k2--){var f=finalized[k2];if(f.powDecimal===sample.decimal&&sample.decimal&&Number(sample.decimal)>0)return f;}
+      return null;
+    }
+    function buildTip(sample,turn){
+      if(!sample)return '';
+      var work=estimatePowWork(sample.rawHex);
+      var lines=[];
+      lines.push('<div style="font-size:12px;font-weight:700;margin-bottom:4px">'+escapeHtml(sample.observedAt?new Date(sample.observedAt).toLocaleTimeString():'')+'</div>');
+      lines.push('<div style="font-size:12px">PoW raw：<b>'+escapeHtml(sample.decimal?Number(sample.decimal).toLocaleString():'—')+'</b></div>');
+      lines.push('<div style="font-size:12px">估算工作量：<b>'+escapeHtml(Number.isFinite(work)?(work>=1000?(work/1000).toFixed(1)+'k×':work.toFixed(1)+'×'):'—')+'</b></div>');
+      if(sample.networkLabel)lines.push('<div style="font-size:12px">网络：'+escapeHtml(sample.networkLabel)+'</div>');
+      if(turn){
+        var st=statusInfo(turn);
+        lines.push('<div style="font-size:12px;margin-top:4px;color:'+(st.tone==='danger'?'var(--danger)':st.tone==='conflict'?'var(--conflict)':st.tone==='normal'?'var(--normal)':st.tone==='warn'?'var(--warn)':'var(--muted)')+'">状态：'+escapeHtml(st.title)+'</div>');
+        if(turn.requestedModel)lines.push('<div style="font-size:12px">调用模型：'+escapeHtml(friendlyModelName(turn.requestedModel))+'</div>');
+        if(turn.assistantModel)lines.push('<div style="font-size:12px">应答模型：'+escapeHtml(friendlyModelName(turn.assistantModel))+'</div>');
+        if(turn.resolvedModel)lines.push('<div style="font-size:12px">服务器确认模型：'+escapeHtml(friendlyModelName(turn.resolvedModel))+'</div>');
+        if(turn.serverModel)lines.push('<div style="font-size:12px">服务器路由：'+escapeHtml(friendlyModelName(turn.serverModel))+'</div>');
+        var comp={coreCaptured:(turn.requestedModel?1:0)+(turn.assistantModel?1:0),allCaptured:(turn.requestedModel?1:0)+(turn.resolvedModel?1:0)+(turn.serverModel?1:0)+(turn.assistantModel?1:0)};
+        lines.push('<div style="font-size:12px">证据完整度：'+comp.allCaptured+'/4</div>');
+        if(turn.promptTopic||turn.promptPreview)lines.push('<div style="font-size:12px;color:var(--muted);margin-top:4px">“'+escapeHtml(clipText(turn.promptTopic||turn.promptPreview,40))+'”</div>');
+      }else{
+        lines.push('<div style="font-size:12px;color:var(--muted)">未关联模型记录</div>');
+      }
+      return '<div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px 10px;box-shadow:0 8px 24px var(--shadow);line-height:1.5">'+lines.join('')+'</div>';
+    }
+    svg.querySelectorAll('[data-pow-idx]').forEach(function(circle){
+      circle.style.cursor='pointer';
+      circle.addEventListener('mouseenter',function(){
+        var idx=parseInt(circle.getAttribute('data-pow-idx'),10);
+        var sample=sampleForIdx(idx);
+        var turn=findTurn(sample);
+        if(!tip)return;
+        tip.innerHTML=buildTip(sample,turn);
+        tip.style.display='block';
+        var wrap=el.querySelector('.pow-svg-wrap');var cRect=circle.getBoundingClientRect();
+        if(wrap){
+          var wRect=wrap.getBoundingClientRect();
+          var left=cRect.left-wRect.left+14;
+          var top=cRect.top-wRect.top-10;
+          if(left>wRect.width-160)left-=180;
+          if(top<0)top=0;
+          tip.style.left=left+'px';
+          tip.style.top=top+'px';
+        }
+      });
+      circle.addEventListener('mouseleave',function(){if(tip)tip.style.display='none';});
+      circle.addEventListener('click',function(){
+        var idx=parseInt(circle.getAttribute('data-pow-idx'),10);
+        var sample=sampleForIdx(idx);
+        var turn=findTurn(sample);
+        if(turn&&tip){
+          var pinned=tip.hasAttribute('data-pinned')&&tip.getAttribute('data-pinned')==='1';
+          if(pinned){tip.removeAttribute('data-pinned');tip.style.display='none';}
+          else{tip.setAttribute('data-pinned','1');tip.style.display='block';}
+        }
+      });
+    });
   },
   renderSettings(el){
     if(!el)return;const st=loadSettings();const toggle=(key,label,desc)=>`<label class="toggle"><span>${escapeHtml(label)}<br><small class="muted">${escapeHtml(desc)}</small></span><input type="checkbox" data-setting="${key}" ${st[key]?'checked':''}></label>`;const opts=Object.entries(THEMES).map(([id,t])=>`<option value="${id}" ${st.theme===id?'selected':''}>${escapeHtml(t.name)}</option>`).join('')+`<option value="system" ${st.theme==='system'?'selected':''}>系统自动</option>`;const sounds=[['glass','玻璃铃'],['beep','电子滴'],['water','水滴'],['dual','双音提示'],['alert','警戒音'],['none','无声音']].map(([id,n])=>`<option value="${id}" ${st.soundType===id?'selected':''}>${n}</option>`).join('');
@@ -1951,9 +2238,10 @@ const TitleFlasher = {
 
 const State = {
   _last:null,_dedupe:new Map(),_historyWritten:new Set(),_powSeen:0,_hooks:{fetch:false,sse:false,pow:"waiting",ws:false},_sessionEntries:[],_latestPow:null,
+  powLinkStats:{LINKED_BY_TURN_ID:0,LINKED_BY_TIME:0,LINKED_BY_DECIMAL:0,UNLINKED:0,AMBIGUOUS:0},
   setHooks(h){Object.assign(this._hooks,h)},
   hookHealth(){const h=this._hooks,overall=h.fetch&&h.sse?'READY':(h.fetch||h.sse)?'PARTIAL':'FAILED';return{overall,fetch:h.fetch,sse:h.sse,pow:h.pow,ws:h.ws}},
-  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection,turnId:TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt?TurnAggregator.activeTurn.turnId:null};this._latestPow=enriched;addPowSample(enriched);if(TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt)TurnAggregator.associatePow(TurnAggregator.activeTurn,sample);postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
+  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const active=TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt?TurnAggregator.activeTurn:null;const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection,turnId:active?active.turnId:null};this._latestPow=enriched;addPowSample(enriched);if(active){TurnAggregator.associatePow(active,sample);this.powLinkStats.LINKED_BY_TURN_ID+=1;}else{this.powLinkStats.UNLINKED+=1;}postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
   resetSession(){this._last=null;this._dedupe.clear();this._historyWritten.clear();this._sessionEntries=[];TurnAggregator.reset()},
   historyForUi(){const persisted=loadHistory(),all=[...this._sessionEntries,...persisted],seen=new Set(),out=[];for(const x of all){const k=x.captureId||x.turnId||`${x.timestamp}:${x.messageId||x.conversationId||''}`;if(seen.has(k))continue;seen.add(k);out.push(x);if(out.length>=CONFIG.MAX_HISTORY)break;}return out},
   // v1.5: emitTurn called by TurnAggregator after finalization.
@@ -2415,7 +2703,8 @@ window.__chatgptModelDowngradeMonitor = {
       } : null,
       finalizedCount: TurnAggregator.finalized.length,
       historyCount: loadHistory().length,
-      powCount: loadPowHistory().length
+      powCount: loadPowHistory().length,
+      powLinkStats: State.powLinkStats
     };
   },
   open() { Dashboard.show(); },
