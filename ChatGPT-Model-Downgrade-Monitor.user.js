@@ -1339,10 +1339,9 @@ const FloatingMonitor = {
     this.host=document.createElement("div");this.host.id="chatgpt-model-downgrade-monitor-badge";this.host.style.cssText="all:initial;position:fixed;z-index:2147483647;touch-action:none;";this.root=this.host.attachShadow({mode:"open"});
     this.root.innerHTML=`<style>
       :host{--accent:#c9a7e8;--panel:#211e2b;--text:#f7f1fb;--surface:#2c2837;--surface2:#181620;--normal:#78dfb0;--danger:#ff879f;--conflict:#c8a0ff;--warn:#f4c96d;--muted:#b8aebe}
-      .bar{position:relative;display:flex;align-items:stretch;height:48px;min-width:230px;max-width:280px;padding:0;border-radius:12px;cursor:grab;user-select:none;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--border, rgba(226,205,239,.20));backdrop-filter:blur(15px) saturate(135%);box-shadow:0 9px 28px rgba(10,8,16,.24);transition:height .28s cubic-bezier(.34,1.56,.64,1),max-width .28s cubic-bezier(.34,1.56,.64,1),border-color .35s ease;overflow:hidden}
+      .bar{position:relative;display:flex;align-items:stretch;height:48px;min-width:230px;max-width:280px;padding:0;border-radius:12px;cursor:pointer;user-select:none;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--border, rgba(226,205,239,.20));backdrop-filter:blur(15px) saturate(135%);box-shadow:0 9px 28px rgba(10,8,16,.24);transition:height .28s cubic-bezier(.34,1.56,.64,1),max-width .28s cubic-bezier(.34,1.56,.64,1),border-color .35s ease;overflow:hidden}
       .bar:hover{height:62px;max-width:380px}
-      .bar:active{cursor:grabbing}
-      .bar-left{display:flex;align-items:center;gap:8px;padding:0 10px;min-width:0;flex-shrink:1}
+      .bar-left{display:flex;align-items:center;gap:8px;padding:0 10px;min-width:0;flex-shrink:1;pointer-events:none}
       .bar-seal{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;flex-shrink:0;background:color-mix(in srgb,var(--accent) 20%,var(--surface2));color:var(--accent);font-size:12px;font-weight:850;transition:background-color .35s,color .35s}
       .bar-model{min-width:0}
       .bar-model-name{font-size:15px;font-weight:700;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:color .35s}
@@ -1350,21 +1349,28 @@ const FloatingMonitor = {
       .bar-model-status.collecting{opacity:.5;animation:bar-pulse-text 1.8s ease-in-out infinite}
       @keyframes bar-pulse-text{0%,100%{opacity:.5}50%{opacity:1}}
       .bar-model-status.hint{font-size:12px;color:var(--muted)}
-      .bar-right{display:flex;align-items:center;padding:0 10px 0 6px;flex-shrink:0;cursor:pointer}
-      .bar-right:hover .wave-svg{filter:brightness(1.15)}
-      .wave-svg{display:block;transition:filter .25s}
-      .bar-wave-label{font-size:10px;color:var(--muted);text-align:center;display:none;line-height:1}
-      .bar:hover .bar-wave-label{display:block}
+      .bar-right{display:flex;align-items:center;padding:0 10px 0 6px;flex-shrink:0;pointer-events:none}
+      .wave-svg{display:block;transition:filter .25s;pointer-events:none}
+      .wave-svg *{pointer-events:none}
+      .pulse-group{pointer-events:none}
       @media(prefers-reduced-motion:reduce){.bar:hover{height:48px;max-width:280px;transition:none}.bar-model-status.collecting{animation:none}}
-    </style><div class="bar" title="拖动移动 · 点击打开模型鉴定姬 · 双击恢复位置"><div class="bar-left" data-region="main"><span class="bar-seal">鉴</span><div class="bar-model"><div class="bar-model-name">模型鉴定姬</div><div class="bar-model-status hint"></div></div></div><div class="bar-right" data-region="pow" title="查看 PoW 分析"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg><div class="bar-wave-label">PoW</div></div></div>`;
+    </style><div class="bar" title="拖动移动 · 点击打开模型鉴定姬 · 双击恢复位置"><div class="bar-left"><span class="bar-seal">鉴</span><div class="bar-model"><div class="bar-model-name">模型鉴定姬</div><div class="bar-model-status hint"></div></div></div><div class="bar-right"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg></div></div>`;
     try{document.documentElement.appendChild(this.host)}catch{return this.root}
     this.restorePosition();this.applyTheme();
     var bar=this.root.querySelector('.bar');
     var self=this;
     if(bar){
       this.installDrag(bar);
-      bar.querySelector('.bar-left').addEventListener('click',function(e){e.stopPropagation();if(self._dragged){self._dragged=false;return}AudioFeedback.unlockOnGesture();Dashboard.toggle()});
-      bar.querySelector('.bar-right').addEventListener('click',function(e){e.stopPropagation();if(self._dragged){self._dragged=false;return}Dashboard.show();Dashboard.activeTab='network';Dashboard.powExpanded=true;Dashboard.render()});
+      bar.addEventListener('click',function(e){
+        if(self._dragged){self._dragged=false;return}
+        AudioFeedback.unlockOnGesture();
+        var waveSvg=self.root.querySelector('.wave-svg');
+        if(waveSvg&&waveSvg.contains(e.target)){
+          Dashboard.show();Dashboard.activeTab='network';Dashboard.powExpanded=true;Dashboard.render();
+        }else{
+          Dashboard.toggle();
+        }
+      });
       bar.addEventListener('dblclick',function(e){e.preventDefault();e.stopPropagation();self.resetPosition()});
       bar.addEventListener('mouseenter',function(){self._expanded=true;self.drawWave()});
       bar.addEventListener('mouseleave',function(){self._expanded=false;self.drawWave()});
@@ -1622,7 +1628,6 @@ drawWave(){
     var prog=this._pulseProgress%pathLen;
     var pt=pathEl.getPointAtLength(prog);
     var trailLen=pathLen*0.06;
-    var r=this._expanded?12:9;
 
     var n=this._cachedSegCount||0;
     var segIndex=0;
@@ -1640,15 +1645,18 @@ drawWave(){
     if(!clr||clr==='var(--muted)')clr='var(--accent)';
 
     var pluseHTML='';
+    // short trail dots following the line
     for(var tr=0;tr<3;tr++){
-      var off=prog-(tr+1)*trailLen*0.7;
+      var off=prog-(tr+1)*trailLen*0.8;
       if(off<0)off+=pathLen;
       var tp=pathEl.getPointAtLength(off);
-      var tr2=3.5-tr*0.8;
-      pluseHTML+='<circle cx="'+tp.x+'" cy="'+tp.y+'" r="'+tr2+'" fill="'+clr+'" opacity="'+(0.35-tr*0.1)+'"/>';
+      var tr2=2.5-tr*0.5;
+      pluseHTML+='<circle cx="'+tp.x+'" cy="'+tp.y+'" r="'+tr2+'" fill="'+clr+'" opacity="'+(0.4-tr*0.1)+'"/>';
     }
-    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="'+r+'" fill="'+clr+'" opacity="0.85"/>';
-    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="'+(r+6)+'" fill="none" stroke="'+clr+'" stroke-width="2" opacity="0.45"/>';
+    // small tight core
+    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="3.5" fill="'+clr+'" opacity="0.9"/>';
+    // thin glow ring
+    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="7" fill="none" stroke="'+clr+'" stroke-width="1.5" opacity="0.5"/>';
     pulseGroup.innerHTML=pluseHTML;
   },
 
