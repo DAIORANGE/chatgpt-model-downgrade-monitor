@@ -23,12 +23,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .parts/part*.b64 | base64 -d > ChatGPT-Model-Downgrade-Monitor.user.js
+          : > ChatGPT-Model-Downgrade-Monitor.user.js
+          for f in .parts/part*.b64; do
+            base64 -d "$f" >> ChatGPT-Model-Downgrade-Monitor.user.js
+          done
           node --check ChatGPT-Model-Downgrade-Monitor.user.js
           sha256sum ChatGPT-Model-Downgrade-Monitor.user.js > ChatGPT-Model-Downgrade-Monitor.user.js.sha256
           grep -q '^// @version      1.4.1$' ChatGPT-Model-Downgrade-Monitor.user.js
           grep -q '^// @homepageURL  https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor$' ChatGPT-Model-Downgrade-Monitor.user.js
           grep -q '^// @updateURL    https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js$' ChatGPT-Model-Downgrade-Monitor.user.js
+          grep -q '^01c7ec96e8bd88df187f2bfed3192670e3ce66c941d3f9bb55142a2c537eee38  ChatGPT-Model-Downgrade-Monitor.user.js$' ChatGPT-Model-Downgrade-Monitor.user.js.sha256
 
       - name: Commit generated public userscript
         shell: bash
