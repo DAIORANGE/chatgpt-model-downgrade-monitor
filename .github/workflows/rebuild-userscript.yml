@@ -25,10 +25,11 @@ jobs:
           set -euo pipefail
           : > ChatGPT-Model-Downgrade-Monitor.user.js
           for f in .parts/part*.b64; do
-            base64 -d "$f" >> ChatGPT-Model-Downgrade-Monitor.user.js
+            base64 --decode --ignore-garbage "$f" >> ChatGPT-Model-Downgrade-Monitor.user.js
           done
           node --check ChatGPT-Model-Downgrade-Monitor.user.js
           sha256sum ChatGPT-Model-Downgrade-Monitor.user.js > ChatGPT-Model-Downgrade-Monitor.user.js.sha256
+          cat ChatGPT-Model-Downgrade-Monitor.user.js.sha256
           grep -q '^// @version      1.4.1$' ChatGPT-Model-Downgrade-Monitor.user.js
           grep -q '^// @homepageURL  https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor$' ChatGPT-Model-Downgrade-Monitor.user.js
           grep -q '^// @updateURL    https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js$' ChatGPT-Model-Downgrade-Monitor.user.js
