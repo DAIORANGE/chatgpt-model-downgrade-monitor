@@ -10,8 +10,8 @@
 // @author       DAIORANGE
 // @homepageURL  https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor
 // @supportURL   https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/issues
-// @downloadURL  https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js
-// @updateURL    https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js
+// @downloadURL  https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/v1.5.0-rc/ChatGPT-Model-Downgrade-Monitor.user.js
+// @updateURL    https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/v1.5.0-rc/ChatGPT-Model-Downgrade-Monitor.user.js
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        none
