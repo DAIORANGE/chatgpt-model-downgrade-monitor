@@ -22,41 +22,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import base64, gzip, hashlib
+          {
+            cat .gzparts/part01.b64
+            cat .repair/p2_01.b64 .repair/p2_02.b64 .repair/p2_03.b64 .repair/p2_04.b64
+            cat .repair/p2_05a.b64 .repair/p2_05b.b64 .repair/p2_05c.b64 .repair/p2_05d.b64
+            cat .repair/p2_06.b64 .repair/p2_07.b64 .repair/p2_08.b64
+            cat .gzparts/part03.b64 .gzparts/part04.b64
+          } > /tmp/userscript.gz.b64
 
-          target = '01c7ec96e8bd88df187f2bfed3192670e3ce66c941d3f9bb55142a2c537eee38'
-          p1 = Path('.gzparts/part01.b64').read_text().strip()
-          p2 = Path('.gzparts/part02.b64').read_text().strip()
-          p3 = Path('.gzparts/part03.b64').read_text().strip()
-          p4 = Path('.gzparts/part04.b64').read_text().strip()
-
-          print('chunk lengths:', len(p1), len(p2), len(p3), len(p4))
-          if len(p2) != 12357:
-              raise SystemExit(f'unexpected part02 length: {len(p2)}')
-
-          found = None
-          for i in range(len(p2)):
-              joined = p1 + p2[:i] + p2[i+1:] + p3 + p4
-              try:
-                  compressed = base64.b64decode(joined, validate=True)
-                  js = gzip.decompress(compressed)
-              except Exception:
-                  continue
-              digest = hashlib.sha256(js).hexdigest()
-              if digest == target:
-                  found = (i, p2[i], js)
-                  break
-
-          if found is None:
-              raise SystemExit('could not recover payload by deleting one extra character from part02')
-
-          i, ch, js = found
-          print(f'recovered payload: removed part02 index={i}, char={ch!r}, bytes={len(js)}')
-          Path('ChatGPT-Model-Downgrade-Monitor.user.js').write_bytes(js)
-          PY
-
+          test "$(wc -c < /tmp/userscript.gz.b64)" -eq 49424
+          base64 -d /tmp/userscript.gz.b64 | gzip -d > ChatGPT-Model-Downgrade-Monitor.user.js
           node --check ChatGPT-Model-Downgrade-Monitor.user.js
           sha256sum ChatGPT-Model-Downgrade-Monitor.user.js > ChatGPT-Model-Downgrade-Monitor.user.js.sha256
           grep -q '^01c7ec96e8bd88df187f2bfed3192670e3ce66c941d3f9bb55142a2c537eee38  ChatGPT-Model-Downgrade-Monitor.user.js$' ChatGPT-Model-Downgrade-Monitor.user.js.sha256
@@ -72,6 +47,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add ChatGPT-Model-Downgrade-Monitor.user.js ChatGPT-Model-Downgrade-Monitor.user.js.sha256
-          git rm -r .parts .gzparts
+          git rm -r .parts .gzparts .repair
           git commit -m 'release: publish v1.4.1 userscript'
           git push origin HEAD:main
