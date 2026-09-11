@@ -3,7 +3,7 @@
 // @name:zh-CN   ChatGPT Model Downgrade Monitor | 模型鉴定姬
 // @name:en      ChatGPT Model Downgrade Monitor
 // @namespace    chatgpt-model-downgrade-monitor
-// @version      1.5.0-rc.2
+// @version      1.5.0-rc.3
 // @description  Detect ChatGPT silent model downgrades, hidden model routing, mini fallbacks, and requested-vs-response model mismatches. Designed for Tampermonkey users on Firefox and Chromium-family browsers.
 // @description:zh-CN  检测 ChatGPT 请求模型、服务器路由与最终应答模型是否一致，帮助发现静默模型切换、mini fallback 与路由冲突；重点面向 Firefox 及其他可安装 Tampermonkey 的桌面浏览器。
 // @description:en  Monitor requested, routed, resolved and assistant-reported ChatGPT models to surface silent model switches and routing conflicts, with Firefox/Tampermonkey compatibility as a primary goal.
@@ -57,6 +57,9 @@ const CONFIG = {
   WS_MAX_FRAME_BYTES: 2 * 1024 * 1024,
   WS_MAX_ENCODED_ITEM_BYTES: 1024 * 1024,
   FINALIZE_GRACE_MS: 2000,
+  PENDING_POW_TTL_MS: 15000,
+  MAX_PENDING_POW: 8,
+  POW_WINDOW: 50,
   DEFAULT_SETTINGS: {
     settingsVersion: 2,
     theme: "wisteria",
@@ -803,6 +806,7 @@ function createTurnEvidence(streamId) {
     transportsSeen: {},
     networkLabel: null,
     networkConnection: null,
+    powId: null,
     powRaw: null,
     powDecimal: null,
 
@@ -836,6 +840,8 @@ const TurnAggregator = {
     var turn = createTurnEvidence(streamId);
     if (conversationId) turn.conversationId = conversationId;
     this.activeTurn = turn;
+    // A7: a PoW observed BEFORE this turn existed is claimed here (newest safe pending sample).
+    try { if (typeof State !== "undefined" && State.claimPendingPowForTurn) State.claimPendingPowForTurn(turn); } catch (e) { /* fail open */ }
     return turn;
   },
 
@@ -974,6 +980,7 @@ const TurnAggregator = {
 
   associatePow(turn, powSample) {
     if (!turn.powRaw) {
+      turn.powId = powSample.powId || null;
       turn.powRaw = powSample.rawHex;
       turn.powDecimal = powSample.decimal;
     }
@@ -1146,6 +1153,22 @@ function addPowSample(sample) {
   return samples;
 }
 
+// A7: linked-in-place update of an EXISTING persisted sample (never a duplicate).
+function updatePowSample(powId, patch) {
+  if (!powId) return false;
+  const samples = loadPowHistory();
+  let changed = false;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i] && samples[i].powId === powId) {
+      samples[i] = { ...samples[i], ...patch };
+      changed = true;
+      break;
+    }
+  }
+  if (changed) savePowHistory(samples);
+  return changed;
+}
+
 function loadSettings() {
   try {
     const raw = localStorage.getItem(CONFIG.STORAGE_SETTINGS_KEY);
@@ -1305,9 +1328,9 @@ const CONCEPTS = Object.freeze({
     ["应答模型","最终显示给你的 ChatGPT 回答自身携带的模型标记。"],
     ["为什么提示冲突","当已捕获证据中出现不止一种模型值，尤其服务器路由/确认字段与最终应答模型不一致时，会显示冲突并列出具体不同字段。"]]},
   completeness:{title:"证据完整度",lead:"它表示这一轮成功捕获了多少项模型证据，不是“插件有多大把握”的主观分数。",sections:[
-    ["核心证据 2/2","核心证据只有两项：调用模型、应答模型。2/2 表示两项都抓到了。"],
-    ["模型证据 4/4","完整模型证据最多四项：调用模型、服务器确认模型、服务器路由、应答模型。4/4 表示四项都抓到了。"],
-    ["为什么这样量化","这样能把“信息不足”变成可检查的事实：到底缺的是哪一项，而不是给一个模糊的置信度百分比。"]]},
+    ["核心对比 2/2","核心对比只有两项：调用模型、应答模型，是“总证据”里的一个子集。2/2 表示两项都抓到了。"],
+    ["总证据 4/4","总证据一共四项：调用模型、应答模型（核心对比），加服务器确认模型、服务器路由（服务器辅助证据）。4/4 表示四项都抓到了。"],
+    ["为什么这样量化","核心对比是子集、总证据是全集，这样能把“信息不足”变成可检查的事实：到底缺的是哪一项，而不是给一个模糊的置信度百分比。"]]},
   rtt:{title:"浏览器网络延迟 · RTT",lead:"浏览器根据近期实际联网情况估算的网络往返延迟，单位是毫秒（ms）。",sections:[
     ["代理环境下包含哪一段","如果你使用 VPN、Clash 或其他代理，它反映的是浏览器实际联网环境的整体效果，可能包含你的电脑 → 本地网络 → 代理链路 → 远端网络 → 网站服务器。"],
     ["它不是什么","它不是“代理节点 → OpenAI”的单独 Ping，也不是专门针对当前这一条 ChatGPT 请求测出的精确延迟。浏览器可能根据近期多个连接做估算。"],
@@ -1339,7 +1362,7 @@ function evidenceSnapshot(entry){
 function statusInfo(entry){
   if(!entry)return{title:"等待鉴定",tone:"unknown",basis:"发送一条消息后，模型鉴定姬会比较调用模型和最终应答模型。",metrics:[]};
   const e=evidenceSnapshot(entry), req=entry.requestedModel, ans=entry.assistantModel;
-  const metrics=[`核心证据 ${e.coreCaptured}/2`,`模型证据 ${e.captured.length}/4`,`${e.unique.length||0} 种模型值`];
+  const metrics=[`核心对比 ${e.coreCaptured}/2`,`总证据 ${e.captured.length}/4`,`${e.unique.length||0} 种模型值`];
   if(entry.verdict===VERDICT.EVIDENCE_CONFLICT){
     const groups=e.unique.map(v=>`${friendlyModelName(v)}：${e.captured.filter(x=>x.value===v).map(x=>x.label).join("、")}`);
     return{title:"路由证据冲突",tone:"conflict",basis:`触发条件：${e.captured.length} 项已捕获模型证据中出现 ${e.unique.length} 种不同模型值。${groups.join("；")}。`,metrics};
@@ -1355,7 +1378,125 @@ function statusInfo(entry){
     return{title:"模型一致",tone:"normal",basis:`触发条件：调用模型 = 应答模型 = ${friendlyModelName(req)}；已捕获的 ${e.captured.length}/4 项模型证据中只出现 1 种模型值。`,metrics};
   }
   const missing=e.items.filter(x=>!x.value).map(x=>x.label);
-  return{title:"信息未完整捕获",tone:"unknown",basis:`触发条件：核心证据只有 ${e.coreCaptured}/2。当前缺少：${missing.join("、")||"未知字段"}。`,metrics};
+  return{title:"信息未完整捕获",tone:"unknown",basis:`触发条件：核心对比只有 ${e.coreCaptured}/2。当前缺少：${missing.join("、")||"未知字段"}。`,metrics};
+}
+
+/* ------------------------------------------------------------------ */
+/* CANONICAL POW SERIES (single source of truth)                       */
+/* ------------------------------------------------------------------ */
+
+const COLOR_RGB_CACHE = new Map();
+function parseCssColorToRgb(value){
+  const key=String(value||"");
+  if(COLOR_RGB_CACHE.has(key))return COLOR_RGB_CACHE.get(key);
+  let out=null;
+  const raw=key.trim();
+  if(/^#[0-9a-f]{3}$/i.test(raw)){
+    out={r:parseInt(raw[1]+raw[1],16),g:parseInt(raw[2]+raw[2],16),b:parseInt(raw[3]+raw[3],16)};
+  }else if(/^#[0-9a-f]{6}$/i.test(raw)){
+    out={r:parseInt(raw.slice(1,3),16),g:parseInt(raw.slice(3,5),16),b:parseInt(raw.slice(5,7),16)};
+  }else{
+    const m=raw.match(/rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/i);
+    if(m)out={r:+m[1],g:+m[2],b:+m[3]};
+  }
+  COLOR_RGB_CACHE.set(key,out);
+  return out;
+}
+function mixCssColor(c1,c2,t){
+  // Continuous local color transition for the travelling pulse (A16).
+  const a=parseCssColorToRgb(c1),b=parseCssColorToRgb(c2);
+  if(!a||!b)return c1;
+  const k=Math.max(0,Math.min(1,Number(t)||0));
+  return "rgb("+Math.round(a.r+(b.r-a.r)*k)+","+Math.round(a.g+(b.g-a.g)*k)+","+Math.round(a.b+(b.b-a.b)*k)+")";
+}
+
+// Canonical semantic phase — ONE mapping shared by node, segment and pulse (A14/A15/A16).
+function powSemanticPhase(linkState,verdict,hasConflict){
+  if(linkState==="pending")return "incomplete";
+  if(linkState==="unlinked"||linkState==="ambiguous")return "unlinked";
+  if(hasConflict&&(verdict===VERDICT.MODEL_MISMATCH||verdict===VERDICT.DOWNGRADE_SUSPECTED))return "mismatch-conflict";
+  if(verdict===VERDICT.NORMAL)return "normal";
+  if(verdict===VERDICT.MODEL_MISMATCH||verdict===VERDICT.DOWNGRADE_SUSPECTED)return "mismatch";
+  if(verdict===VERDICT.EVIDENCE_CONFLICT)return "conflict";
+  return "incomplete";
+}
+function powSemanticColor(phase,theme){
+  const t=theme||activeTheme();
+  if(phase==="normal")return t.normal;
+  if(phase==="mismatch"||phase==="mismatch-conflict")return t.danger;
+  if(phase==="conflict")return t.conflict;
+  if(phase==="incomplete")return t.warn;
+  return t.muted;
+}
+
+// ONE builder for every PoW consumer (full chart + collapsed/expanded mini + tooltip + debug).
+// Ordering is always OLD -> NEW (left -> right); consumers take .slice(-N) for tails (A11/A12).
+// Association is powId <-> turnId only. powDecimal is never an identity (A10).
+function buildPowSeries(limit){
+  const cap=Number.isFinite(limit)&&limit>0?Math.min(limit,CONFIG.MAX_POW_SAMPLES):CONFIG.POW_WINDOW;
+  const samples=loadPowHistory();
+  const finalized=TurnAggregator&&Array.isArray(TurnAggregator.finalized)?TurnAggregator.finalized:[];
+  const active=TurnAggregator&&TurnAggregator.activeTurn?TurnAggregator.activeTurn:null;
+  const turnById={};
+  for(let i=0;i<finalized.length;i++){const ft=finalized[i];if(ft&&ft.turnId)turnById[ft.turnId]=ft;}
+  if(active&&active.turnId)turnById[active.turnId]=active;
+
+  const now=Date.now();
+  const raw=[];
+  for(let i=0;i<samples.length&&i<cap;i++){
+    const p=samples[i];
+    if(!p)continue;
+    const work=estimatePowWork(p.rawHex);
+    if(!Number.isFinite(work))continue;
+
+    let linkState=p.linkState||(p.turnId?"linked":"unlinked");
+    let turn=p.turnId&&turnById[p.turnId]?turnById[p.turnId]:null;
+
+    if(!turn&&linkState==="linked")linkState="unlinked";
+    if(!turn&&linkState==="pending"){
+      const pendTs=p.observedAt?new Date(p.observedAt).getTime():0;
+      if(!pendTs||now-pendTs>CONFIG.PENDING_POW_TTL_MS)linkState="unlinked";
+    }
+    if(!turn&&linkState==="unlinked"&&!p.powId){
+      // Conservative legacy fallback: exact rawHex match to exactly ONE finalized turn.
+      // Ambiguous matches stay GRAY, never silently first-matched.
+      const matches=[];
+      for(let lk=finalized.length-1;lk>=0;lk--){const ft=finalized[lk];if(ft&&ft.powRaw&&ft.powRaw===p.rawHex)matches.push(ft);}
+      if(matches.length===1){turn=matches[0];linkState="legacy";}
+      else if(matches.length>1){linkState="ambiguous";}
+    }
+
+    const verdict=turn?(turn.primaryVerdict||turn.verdict||null):null;
+    const findings=turn&&Array.isArray(turn.findings)?turn.findings.slice():[];
+    const hasConflict=findings.indexOf("ROUTE_EVIDENCE_CONFLICT")>=0;
+    raw.push({
+      powId:p.powId||null,
+      turnId:p.turnId||null,
+      observedAt:p.observedAt||null,
+      rawHex:p.rawHex||"",
+      decimal:p.decimal!==undefined&&p.decimal!==null?String(p.decimal):null,
+      work:work,
+      linkState:linkState,
+      phase:powSemanticPhase(linkState,verdict,hasConflict),
+      verdict:verdict,
+      findings:findings,
+      hasConflict:hasConflict,
+      requestedModel:turn?turn.requestedModel||null:null,
+      resolvedModel:turn?turn.resolvedModel||null:null,
+      serverModel:turn?turn.serverModel||null:null,
+      assistantModel:turn?turn.assistantModel||null:null,
+      networkLabel:p.networkLabel||"",
+      turn:turn||null
+    });
+  }
+  const points=raw.reverse(); // OLD -> NEW
+  let scaleMin=null,scaleMax=null;
+  if(points.length){
+    scaleMin=points[0].work;scaleMax=points[0].work;
+    for(let i=1;i<points.length;i++){const w=points[i].work;if(w<scaleMin)scaleMin=w;if(w>scaleMax)scaleMax=w;}
+    if(scaleMax-scaleMin<0.001)scaleMax=scaleMin+0.001;
+  }
+  return {points:points,scaleMin:scaleMin,scaleMax:scaleMax,count:points.length};
 }
 
 /* ================================================================== */
@@ -1442,15 +1583,18 @@ const FloatingMonitor = {
   startAnim(){
     if(this.animFrame)return;
     var self=this;
+    this._animActive=true;
     this._pulseProgress=0;
-    this._pulsePathLen=1;
+    if(!this._pulsePathLen)this._pulsePathLen=1;
     var lastT=0;
     function frame(ts){
       if(!lastT)lastT=ts;
       var dt=Math.min(50,ts-lastT);lastT=ts;
       var speed=self._pulsePathLen/(self._expanded?7:11)*dt/1000;
       self._pulseProgress+=speed;
-      if(self._pulseProgress>=self._pulsePathLen)self._pulseProgress=0;
+      // A4: progress keeps increasing and wraps; the opacity envelope fades both
+      // ends, so there is no hard disappearance and no broken tail.
+      if(self._pulseProgress>=self._pulsePathLen)self._pulseProgress=self._pulseProgress%self._pulsePathLen;
       self._renderPulseOnly();
       self.animFrame=requestAnimationFrame(frame);
     }
@@ -1458,42 +1602,20 @@ const FloatingMonitor = {
   },
 
   stopAnim(){
+    this._animActive=false;
     if(this.animFrame){cancelAnimationFrame(this.animFrame);this.animFrame=null}
     this._pulseProgress=0;
+    this._renderPulseOnly();
   },
 
   _expanded:false,
   _lastGeomTS:0,
 
   getPoWPoints(count){
+    // Canonical delegation: the mini chart is an exact tail of the ONE canonical series.
     count=count||9;
-    var pow=loadPowHistory().slice(0,count);
-    var finalized=TurnAggregator.finalized;
-    var turnById={};
-    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.turnId)turnById[ft.turnId]=ft;}
-    var results=[];
-    for(var i=pow.length-1;i>=0;i--){
-      var p=pow[i];
-      var work=estimatePowWork(p.rawHex);if(!Number.isFinite(work))continue;
-      var associated=null;
-      if(p.turnId&&turnById[p.turnId])associated=turnById[p.turnId];
-      else if(p.turnId){for(var j=finalized.length-1;j>=0;j--){if(finalized[j].turnId===p.turnId){associated=finalized[j];break;}}}
-      if(!associated){
-        for(var k=finalized.length-1;k>=0;k--){
-          var fk=finalized[k];
-          if(fk.powDecimal===p.decimal&&p.decimal&&p.decimal!=='undefined'&&p.decimal!=='null'&&Number(p.decimal)>0){
-            if(!associated||(fk.timestamp&&Math.abs(fk.timestamp-Date.now())<30000))associated=fk;
-            break;
-          }
-        }
-      }
-      var v=associated?associated.primaryVerdict:null;
-      var hasConflict=associated&&associated.findings&&associated.findings.indexOf('ROUTE_EVIDENCE_CONFLICT')>=0;
-      results.push({work:work,rawDecimal:Number(p.decimal),raw:p.rawHex,t:p.observedAt?new Date(p.observedAt).getTime():0,verdict:v,hasConflict:hasConflict,turnId:p.turnId||null,assistantModel:associated?associated.assistantModel:null});
-      if(results.length>=count)break;
-    }
-    results.reverse();
-    return results;
+    var series=buildPowSeries(CONFIG.POW_WINDOW);
+    return series.points.slice(-count);
   },
 
   getStateInfo(){
@@ -1558,86 +1680,81 @@ const FloatingMonitor = {
 
   colorForVerdict(v,t){if(!t)t=activeTheme();return v===VERDICT.NORMAL?t.normal:v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED?t.danger:v===VERDICT.EVIDENCE_CONFLICT?t.conflict:v===VERDICT.ROUTE_NOTICE||v===VERDICT.UNKNOWN?t.warn:t.muted},
 
-drawWave(){
+  drawWave(){
     var root=this.root;if(!root)return;
     var svg=root.querySelector('.wave-svg');if(!svg)return;
     var _expanded=this._expanded;
     var count=_expanded?18:9;
-    var points=this.getPoWPoints(count);
+    // A12: the mini chart is an EXACT tail of the canonical full window.
+    var series=buildPowSeries(CONFIG.POW_WINDOW);
+    var points=series.points.slice(-count);
     this._lastGeomTS=Date.now();
     if(points.length<2){
       svg.setAttribute('width',_expanded?'220':'90');
       svg.setAttribute('viewBox','0 0 ' + (_expanded?'220':'90') + ' 44');
       svg.innerHTML='<polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 ' + (_expanded?'220':'90') + ',22"/>';
+      this._lastPathD=null;this._pulsePathLen=0;this._cachedSegCount=0;this._segColorPairs=[];
       return;
     }
     var n=points.length;
     var w=_expanded?220:90;var h=44;
     var padX=5,l=padX,r=w-padX,plotW=r-l,plotH=h-10;
-    var works=points.map(function(p){return p.work;});
-    var maxW=Math.max.apply(null,works),minW=Math.min.apply(null,works);
+    // A13: shared Y scale from the FULL canonical window, never the mini subset.
+    var minW=Number.isFinite(series.scaleMin)?series.scaleMin:Math.min.apply(null,points.map(function(p){return p.work;}));
+    var maxW=Number.isFinite(series.scaleMax)?series.scaleMax:Math.max.apply(null,points.map(function(p){return p.work;}));
     var span=Math.max(0.001,maxW-minW);
     function xFn(i){return l+(n===1?plotW/2:i/(n-1))*plotW;}
     function yFn(v){return 5+(1-(v-minW)/span)*plotH;}
 
     var t=activeTheme();
-    function nodeColor(v2,hasC){return v2===VERDICT.NORMAL?t.normal:v2===VERDICT.MODEL_MISMATCH||v2===VERDICT.DOWNGRADE_SUSPECTED?t.danger:v2===VERDICT.EVIDENCE_CONFLICT||hasC?t.conflict:v2===VERDICT.ROUTE_NOTICE||v2===VERDICT.UNKNOWN?t.warn:t.muted;}
+    function nodeColor(p){return powSemanticColor(p.phase,t);}
 
     var segColors=[];
     for(var i=0;i<n-1;i++){
-      var cA=nodeColor(points[i].verdict,points[i].hasConflict);
-      var cB=nodeColor(points[i+1].verdict,points[i+1].hasConflict);
-      var gradId='seg-grad-' + i;
-      segColors.push({id:gradId,from:cA,to:cB});
+      segColors.push({id:'seg-grad-'+i,from:nodeColor(points[i]),to:nodeColor(points[i+1])});
     }
 
     var segments='';
     var defs='';
     for(var i=0;i<n-1;i++){
-      var x1=xFn(i),y1=yFn(works[i]),x2=xFn(i+1),y2=yFn(works[i+1]);
+      var x1=xFn(i),y1=yFn(points[i].work),x2=xFn(i+1),y2=yFn(points[i+1].work);
       var sc=segColors[i];
-      defs+='<linearGradient id="'+sc.id+'" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="'+sc.from+'" stop-opacity="0.85"/><stop offset="100%" stop-color="'+sc.to+'" stop-opacity="0.85"/></linearGradient>';
-      segments+='<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="url(#'+sc.id+')" stroke-width="2" stroke-linecap="round"/>';
+      defs+='<linearGradient id="'+sc.id+'" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="'+sc.from+'" stop-opacity="0.92"/><stop offset="100%" stop-color="'+sc.to+'" stop-opacity="0.92"/></linearGradient>';
+      segments+='<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="url(#'+sc.id+')" stroke-width="2.4" stroke-linecap="round"/>';
     }
 
     var nodes='';
     for(var i=0;i<n;i++){
-      var xx=xFn(i),yy=yFn(works[i]);
-      var v=points[i].verdict;
-      var hasC=points[i].hasConflict;
-      var fill=v===VERDICT.NORMAL?t.normal:v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED?t.danger:v===VERDICT.EVIDENCE_CONFLICT||hasC?t.conflict:v===VERDICT.ROUTE_NOTICE||v===VERDICT.UNKNOWN?t.warn:t.muted;
-      var r2=v&&(v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED)?4:2.8;
-      var stroke2=v&&(v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED)&&hasC?' stroke="'+t.conflict+'" stroke-width="1.5"':'';
-      nodes+='<circle cx="'+xx+'" cy="'+yy+'" r="'+r2+'" fill="'+fill+'" opacity=".85"'+stroke2+'/>';
+      var xx=xFn(i),yy=yFn(points[i].work);
+      var fill=nodeColor(points[i]);
+      var r2=(points[i].phase==='mismatch'||points[i].phase==='mismatch-conflict')?4:2.8;
+      var stroke2=points[i].phase==='mismatch-conflict'?' stroke="'+t.conflict+'" stroke-width="1.5"':'';
+      nodes+='<circle cx="'+xx+'" cy="'+yy+'" r="'+r2+'" fill="'+fill+'" opacity=".95"'+stroke2+'/>';
     }
 
-    var pathD='M' + xFn(0) + ',' + yFn(works[0]);
-    for(var i=1;i<n;i++){pathD+=' L'+xFn(i)+','+yFn(works[i]);}
+    var pathD='M' + xFn(0) + ',' + yFn(points[0].work);
+    for(var i=1;i<n;i++){pathD+=' L'+xFn(i)+','+yFn(points[i].work);}
 
     svg.setAttribute('width',String(w));
     svg.setAttribute('viewBox','0 0 '+w+' '+h);
     svg.innerHTML='<defs>'+defs+'</defs>' + segments + nodes + '<path id="wave-path" d="'+pathD+'" fill="none" stroke="transparent" stroke-width="4"/>';
     this._lastPathD=pathD;
     this._cachedSegCount=n;
-    this._cachedSegColors=[];
     this._segColorPairs=[];
     for(var si=0;si<segColors.length;si++){
-      this._cachedSegColors.push(segColors[si].to);
       this._segColorPairs.push({from:segColors[si].from,to:segColors[si].to});
     }
-    if(segColors.length>0)this._cachedSegColors.unshift(segColors[0].from);
     this._pulsePathLen=this._getPulsePathLen(svg);
-    // Precompute cumulative per-segment path lengths for accurate pulse→segment mapping
+    // Precompute cumulative per-segment path lengths for accurate pulse->segment mapping.
     var pathEl2=svg.querySelector('#wave-path');
     this._segCumulativeLen=[];
     if(pathEl2&&n>=2){
       var totalLen=this._pulsePathLen||pathEl2.getTotalLength();
       var cumSum=0;
-      for(var si=0;si<n-1;si++){
-        var x1=xFn(si),y1=yFn(works[si]),x2=xFn(si+1),y2=yFn(works[si+1]);
-        var dx=x2-x1,dy=y2-y1;
-        var segLenApprox=Math.sqrt(dx*dx+dy*dy);
-        cumSum+=segLenApprox;
+      for(var sj=0;sj<n-1;sj++){
+        var sx1=xFn(sj),sy1=yFn(points[sj].work),sx2=xFn(sj+1),sy2=yFn(points[sj+1].work);
+        var dx=sx2-sx1,dy=sy2-sy1;
+        cumSum+=Math.sqrt(dx*dx+dy*dy);
         this._segCumulativeLen.push(cumSum/totalLen);
       }
     }
@@ -1655,12 +1772,17 @@ drawWave(){
   _renderPulseOnly(){
     var root=this.root;if(!root)return;
     var svg=root.querySelector('.wave-svg');if(!svg)return;
-    var pulseIds=['pulse-stroke','pulse-head','pulse-trail1','pulse-trail2'];
-    for(var pi=0;pi<pulseIds.length;pi++){
-      var pe=svg.querySelector('#'+pulseIds[pi]);
-      if(!pe){
-        pe=document.createElementNS('http://www.w3.org/2000/svg','path');
-        pe.setAttribute('id',pulseIds[pi]);
+    // A2: pulse overlays share the EXACT path geometry of #wave-path via
+    // stroke-dasharray / stroke-dashoffset. Never a two-point straight chord.
+    var ids=['pulse-main','pulse-trail-1','pulse-trail-2'];
+    if(!this._animActive){
+      for(var ri=0;ri<ids.length;ri++){var re=svg.querySelector('#'+ids[ri]);if(re&&re.parentNode)re.parentNode.removeChild(re);}
+      return;
+    }
+    for(var pi=0;pi<ids.length;pi++){
+      if(!svg.querySelector('#'+ids[pi])){
+        var pe=document.createElementNS('http://www.w3.org/2000/svg','path');
+        pe.setAttribute('id',ids[pi]);
         pe.setAttribute('fill','none');
         pe.setAttribute('stroke-linecap','round');
         pe.style.pointerEvents='none';
@@ -1668,17 +1790,17 @@ drawWave(){
       }
     }
     var pathEl=svg.querySelector('#wave-path');
-    if(!pathEl)return;
+    if(!pathEl||!this._lastPathD)return;
     try{
-      if(!this._pulsePathLen||this._pulsePathLen<1)this._pulsePathLen=pathEl.getTotalLength();
+      if(!this._pulsePathLen||this._pulsePathLen<=1)this._pulsePathLen=pathEl.getTotalLength();
     }catch(e){return;}
     var pathLen=this._pulsePathLen;
     if(pathLen<1)return;
     if(!this._pulseProgress)this._pulseProgress=0;
     var prog=this._pulseProgress%pathLen;
-    var pt=pathEl.getPointAtLength(prog);
+    if(prog<0)prog+=pathLen;
 
-    // Exact segment index + local fraction for continuous color interpolation.
+    // Exact segment index + local fraction for continuous color interpolation (A16).
     var n=this._cachedSegCount||0;
     var segIndex=0;
     var localFrac=0;
@@ -1705,78 +1827,37 @@ drawWave(){
     var segPairs=this._segColorPairs;
     var fromClr=segPairs&&segPairs[segIndex]?segPairs[segIndex].from:'var(--accent)';
     var toClr=segPairs&&segPairs[segIndex]?segPairs[segIndex].to:fromClr;
-    var clr=fromClr;
-    if(segPairs&&segPairs[segIndex])clr=FloatingMonitor._mixCssColor(fromClr,toClr,localFrac);
+    var clr=segPairs&&segPairs[segIndex]?mixCssColor(fromClr,toClr,localFrac):fromClr;
 
-    var strokeLen=pathLen*0.10;
-    var dashFrom=prog-strokeLen;
-    var head=svg.querySelector('#pulse-head');
-    var stroke=svg.querySelector('#pulse-stroke');
-    if(head){
-      head.setAttribute('d','M'+(pt.x-2)+','+pt.y+' L'+(pt.x+2)+','+pt.y);
-      head.setAttribute('stroke',clr);
-      head.setAttribute('stroke-width','3');
-      head.setAttribute('opacity','0.95');
-    }
-    if(stroke){
-      var tailFrom=Math.max(0,dashFrom);
-      var tailTo=prog;
-      var d='';
-      if(tailTo>tailFrom){
-        var pA=pathEl.getPointAtLength(tailFrom);
-        var pB=pathEl.getPointAtLength(tailTo);
-        d='M'+pA.x+','+pA.y+' L'+pB.x+','+pB.y;
-      }
-      stroke.setAttribute('d',d);
-      stroke.setAttribute('stroke',clr);
-      stroke.setAttribute('stroke-width','2.2');
-      stroke.setAttribute('opacity','0.55');
-    }
-    var ext=svg.querySelector('#pulse-trail1');
-    var ext2=svg.querySelector('#pulse-trail2');
-    if(ext){
-      var tOff=Math.max(0,dashFrom-pathLen*0.05);
-      if(tOff>=0&&tOff<pathLen){
-        var pC=pathEl.getPointAtLength(tOff);
-        var pD=pathEl.getPointAtLength(tailFrom);
-        ext.setAttribute('d','M'+pC.x+','+pC.y+' L'+pD.x+','+pD.y);
-        ext.setAttribute('stroke',clr);
-        ext.setAttribute('stroke-width','1.6');
-        ext.setAttribute('opacity','0.22');
-      }else{
-        ext.setAttribute('d','');
-      }
-    }
-    if(ext2){
-      var tOff2=Math.max(0,dashFrom-pathLen*0.10);
-      if(tOff2>=0&&tOff2<pathLen){
-        var pE=pathEl.getPointAtLength(tOff2);
-        var pF=pathEl.getPointAtLength(Math.max(0,dashFrom-pathLen*0.05));
-        ext2.setAttribute('d','M'+pE.x+','+pE.y+' L'+pF.x+','+pF.y);
-        ext2.setAttribute('stroke',clr);
-        ext2.setAttribute('stroke-width','1');
-        ext2.setAttribute('opacity','0.1');
-      }else{
-        ext2.setAttribute('d','');
-      }
-    }
+    // A4: gentle fade at both cycle ends; the base waveform is never affected.
+    var env=this._pulseEnvelope(prog,pathLen);
+    var mainLen=pathLen*0.10;
+    var mainFrom=Math.max(0,prog-mainLen);
+    this._setDashSegment('#pulse-main',mainFrom,prog,pathLen,clr,2.4,0.62*env);
+    this._setDashSegment('#pulse-trail-1',Math.max(0,mainFrom-pathLen*0.05),mainFrom,pathLen,clr,1.7,0.24*env);
+    this._setDashSegment('#pulse-trail-2',Math.max(0,mainFrom-pathLen*0.10),Math.max(0,mainFrom-pathLen*0.05),pathLen,clr,1.1,0.10*env);
   },
 
-  _mixCssColor(c1,c2,t){
-    // Mix two CSS colors returning rgb() string. Continuous pulse color transition.
-    try{
-      var parse=function(c){
-        var wrap=document.createElement('div');wrap.style.color=c;document.body.appendChild(wrap);
-        var cs=getComputedStyle(wrap).color;wrap.remove();
-        var m=cs.match(/rgba?\(([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s\/]+([\d.]+))?\)/);
-        return m?{r:+m[1],g:+m[2],b:+m[3],a:m[4]!==undefined?+m[4]:1}:null;
-      };
-      var a=parse(c1),b2=parse(c2);
-      if(!a||!b2)return c1;
-      t=Math.max(0,Math.min(1,t));
-      var r=Math.round(a.r+(b2.r-a.r)*t),g=Math.round(a.g+(b2.g-a.g)*t),b=Math.round(a.b+(b2.b-a.b)*t);
-      return 'rgb('+r+','+g+','+b+')';
-    }catch(e){return c1;}
+  _pulseEnvelope(prog,pathLen){
+    if(!(pathLen>0))return 1;
+    var fadeZone=pathLen*0.06;
+    var env=Math.min(1,Math.max(0,prog)/fadeZone,Math.max(0,pathLen-prog)/fadeZone);
+    return Number.isFinite(env)?Math.max(0,Math.min(1,env)):1;
+  },
+
+  _setDashSegment(sel,from,to,pathLen,color,width,opacity){
+    var root=this.root;if(!root)return;
+    var svg=root.querySelector('.wave-svg');if(!svg)return;
+    var el=svg.querySelector(sel);if(!el)return;
+    var d=this._lastPathD;
+    var len=to-from;
+    if(!d||!(len>0.0001)){el.removeAttribute('d');el.setAttribute('opacity','0');return;}
+    el.setAttribute('d',d);
+    el.setAttribute('stroke-dasharray',len+' '+(pathLen+2));
+    el.setAttribute('stroke-dashoffset',String(-from));
+    el.setAttribute('stroke',color);
+    el.setAttribute('stroke-width',String(width));
+    el.setAttribute('opacity',String(Math.max(0,Math.min(1,opacity))));
   },
 
   maybeStartAnim(){
@@ -1960,41 +2041,23 @@ const Dashboard = {
     const bars=[...models.entries()].sort((a,b)=>b[1]-a[1]).map(([m,n])=>`<div class="barrow"><div class="barhead"><span>${escapeHtml(friendlyModelName(m))}</span><span>${n} · ${total?Math.round(n/total*100):0}%</span></div><div class="bar"><i style="width:${total?n/total*100:0}%"></i></div></div>`).join('');const netRows=[...networks.entries()].map(([n,g])=>`<div class="minirow"><b>${escapeHtml(n)}</b> · ${g.n} 次 · 模型不一致/冲突 ${g.bad} 次 · ${g.n?Math.round(g.bad/g.n*100):0}%</div>`).join('');
     el.innerHTML=`<div class="section-title">总览</div><div class="statgrid"><div class="stat"><b>${total}</b><small>记录</small></div><div class="stat"><b>${counts.normal}</b><small>模型一致</small></div><div class="stat"><b>${counts.mismatch}</b><small>请求≠应答</small></div><div class="stat"><b>${counts.conflict}</b><small>证据冲突</small></div></div><div class="splitgrid"><div class="card"><div class="section-title" style="margin-top:0">异常监测</div><div class="minirow">请求与应答不一致：<b>${counts.mismatch}</b></div><div class="minirow">路由证据冲突：<b>${counts.conflict}</b></div><div class="minirow">服务器字段变化：<b>${counts.notice}</b></div><div class="minirow">信息未完整：<b>${counts.unknown}</b></div></div><div class="card"><div class="section-title" style="margin-top:0">节点表现</div>${netRows||'<div class="empty">暂无数据</div>'}</div></div><div class="card"><div class="section-title" style="margin-top:0">模型使用比例</div>${bars||'<div class="empty">暂无数据</div>'}</div><div class="section-title">模型档案 · 一问一答一张卡</div>${hist.length?hist.map(x=>this.routeCard(x,true)).join(''):'<div class="empty">暂无档案。</div>'}`;
   },
-powChart(samples){
-    var finalized=TurnAggregator.finalized;
-    var turnById={};
-    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.turnId)turnById[ft.turnId]=ft;}
-    var pts=[];for(var i=0;i<samples.length;i++){
-      var x=samples[i];var work=estimatePowWork(x.rawHex);if(!Number.isFinite(work))continue;
-      // TurnId-first association; powDecimal is only a fallback, never the sole key.
-      var assoc=null;
-      if(x.turnId&&turnById[x.turnId])assoc=turnById[x.turnId];
-      else if(x.turnId){for(var fj=finalized.length-1;fj>=0;fj--){if(finalized[fj].turnId===x.turnId){assoc=finalized[fj];break;}}}
-      if(!assoc){
-        for(var fk=finalized.length-1;fk>=0;fk--){
-          var ff=finalized[fk];
-          if(ff.powDecimal===x.decimal&&x.decimal&&x.decimal!=='undefined'&&Number(x.decimal)>0){assoc=ff;break;}
-        }
-      }
-      pts.push({raw:x.rawHex||'',rawDecimal:Number(x.decimal),work:work,t:x.observedAt?new Date(x.observedAt):null,label:x.networkLabel||'',verdict:assoc?assoc.primaryVerdict:null,turn:assoc});
-    }pts.reverse();
+  powChart(samples){
+    // Canonical series only — full chart, collapsed mini and expanded mini share it (A11/A13).
+    var series=buildPowSeries(CONFIG.POW_WINDOW);
+    var pts=series.points;
     if(pts.length<2)return '<div class="empty">PoW 样本不足，暂时无法画估算工作量趋势。</div>';
-    var vals=pts.map(function(p){return p.work;}),min=Math.min.apply(null,vals),max=Math.max.apply(null,vals),span=Math.max(.001,max-min),n=pts.length,w=Math.max(700,n*76),h=300,l=70,r=26,tt=36,b=54,plotW=w-l-r,plotH=h-tt-b;
+    var min=Number.isFinite(series.scaleMin)?series.scaleMin:0,max=Number.isFinite(series.scaleMax)?series.scaleMax:1,span=Math.max(.001,max-min),n=pts.length,w=Math.max(700,n*76),h=300,l=70,r=26,tt=36,b=54,plotW=w-l-r,plotH=h-tt-b;
     function xFn(i){return l+(n===1?0:i/(n-1))*plotW;}function yFn(v){return tt+(max-v)/span*plotH;}
     function fmtWork(v){return v>=1000?(v/1000).toFixed(v>=10000?0:1)+'k×':v>=100?v.toFixed(0)+'×':v>=10?v.toFixed(1)+'×':v.toFixed(2)+'×';}
     var ticks=5;var grid='';
     for(var ti=0;ti<ticks;ti++){var val=max-(span*ti/(ticks-1)),yy=yFn(val);grid+='<line x1="'+l+'" y1="'+yy+'" x2="'+(w-r)+'" y2="'+yy+'" stroke="var(--border)" stroke-width="1"/><text x="'+(l-9)+'" y="'+(yy+4)+'" text-anchor="end" fill="var(--muted)" font-size="12">'+fmtWork(val)+'</text>';}
     var line=pts.map(function(p,i){return xFn(i)+','+yFn(p.work);}).join(' ');
     var circles='';
-    var tooltipData=[];
+    var theme=activeTheme();
     for(var ci=0;ci<pts.length;ci++){
-      var p=pts[ci],xx=xFn(ci),yy2=yFn(p.work),time=p.t&&!Number.isNaN(p.t)?p.t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'#'+(ci+1);
-      var fill='var(--muted)',stroke='var(--panel)';
-      if(p.verdict===VERDICT.NORMAL){fill='var(--normal)';}
-      else if(p.verdict===VERDICT.MODEL_MISMATCH||p.verdict===VERDICT.DOWNGRADE_SUSPECTED){fill='var(--danger)';if(p.turn&&p.turn.findings&&p.turn.findings.indexOf('ROUTE_EVIDENCE_CONFLICT')>=0)stroke='var(--conflict)';}
-      else if(p.verdict===VERDICT.EVIDENCE_CONFLICT){fill='var(--conflict)';}
-      else if(p.verdict===VERDICT.ROUTE_NOTICE||p.verdict===VERDICT.UNKNOWN){fill='var(--warn)';}
-      tooltipData.push({idx:ci,pt:p});
+      var p=pts[ci],xx=xFn(ci),yy2=yFn(p.work),ts=p.observedAt?new Date(p.observedAt):null,time=ts&&!Number.isNaN(ts.getTime())?ts.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'#'+(ci+1);
+      var fill=powSemanticColor(p.phase,theme);
+      var stroke=(p.phase==='mismatch-conflict')?theme.conflict:'var(--panel)';
       var showLabel=n<=20||ci%Math.ceil(n/20)===0;
       circles+='<circle data-pow-idx="'+ci+'" cx="'+xx+'" cy="'+yy2+'" r="5.5" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"/>';
       if(showLabel){circles+='<text x="'+xx+'" y="'+Math.max(14,yy2-10)+'" text-anchor="middle" fill="var(--text)" font-size="12">'+fmtWork(p.work)+'</text><text x="'+xx+'" y="'+(h-18)+'" text-anchor="middle" fill="var(--muted)" font-size="12">'+escapeHtml(time)+'</text>';}
@@ -2013,47 +2076,30 @@ powChart(samples){
     el.innerHTML=`<div class="section-title">当前网络</div><div class="card"><div class="field"><label>节点 / 网络名称（手动命名）</label><input type="text" data-role="network-label" value="${escapeHtml(st.networkLabel||'未命名网络')}" maxlength="64"></div><button class="btn" data-act="save-network">保存标签</button><div class="muted" style="margin-top:8px">浏览器无法可靠读取 OpenClash 当前节点名，所以这里使用你自己定义的标签；之后每轮鉴定都会自动带上它。</div>${snap.connection?`<div class="splitgrid" style="margin-top:10px"><div class="minirow">浏览器网络延迟 ${conceptButton('rtt')}<br><b>${Number.isFinite(c.rtt)?c.rtt+' ms':'—'}</b></div><div class="minirow">浏览器下行估算 ${conceptButton('downlink')}<br><b>${Number.isFinite(c.downlink)?c.downlink+' Mbps':'—'}</b></div></div>`:''}</div><div class="section-title">PoW 分析 ${conceptButton('pow')}</div><div class="card"><div class="pow-summary"><div class="pow-stat"><b>${pow.length}</b><small>样本</small></div><div class="pow-stat"><b>${fmtWork(avgWork)}</b><small>平均估算工作量</small></div><div class="pow-stat"><b>${fmtWork(medianWork)}</b><small>中位估算工作量</small></div><div class="pow-stat"><b>${latest&&latest.decimal?Number(latest.decimal).toLocaleString():'—'}</b><small>最新 raw 阈值</small></div></div><button class="btn" data-act="pow-toggle">${this.powExpanded?'收起':'展开'} PoW 趋势图</button>${this.powExpanded?this.powChart(pow):'<div class="muted" style="margin-top:8px">默认折叠。点 PoW ⓘ 可以看“为什么平台使用它、数字大小怎么读、为什么不能把它当 IP 质量分”。</div>'}</div><div class="section-title">按网络标签统计</div>${rows||'<div class="empty">暂无网络统计。</div>'}`;const save=el.querySelector('[data-act="save-network"]');if(save)save.addEventListener('click',()=>{const input=el.querySelector('[data-role="network-label"]'),s=loadSettings();s.networkLabel=(input.value||'未命名网络').trim().slice(0,64)||'未命名网络';saveSettings(s);save.textContent='已保存';setTimeout(()=>this.render(),450)});const pt=el.querySelector('[data-act="pow-toggle"]');if(pt)pt.addEventListener('click',()=>{this.powExpanded=!this.powExpanded;this.render()});this.wirePowTooltip(el)
   },
   wirePowTooltip(el){
-    var self=this;
     var svg=el.querySelector('.pow-svg');if(!svg)return;
     var tip=el.querySelector('[data-role="pow-tooltip"]');
-    var finalized=TurnAggregator.finalized;
-    var turnById={};
-    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.turnId)turnById[ft.turnId]=ft;}
-    var samples=loadPowHistory().slice(0,50);
-    function sampleForIdx(idx){
-      var work=0,arr=[];
-      for(var i=0;i<samples.length;i++){
-        var x=samples[i];var w=estimatePowWork(x.rawHex);if(!Number.isFinite(w))continue;
-        arr.push(x);work=w;if(arr.length>=50)break;
-      }
-      arr.reverse();
-      return arr[idx]||null;
-    }
-    function findTurn(sample){
-      if(!sample)return null;
-      if(sample.turnId&&turnById[sample.turnId])return turnById[sample.turnId];
-      if(sample.turnId){for(var k=finalized.length-1;k>=0;k--){if(finalized[k].turnId===sample.turnId)return finalized[k];}}
-      for(var k2=finalized.length-1;k2>=0;k2--){var f=finalized[k2];if(f.powDecimal===sample.decimal&&sample.decimal&&Number(sample.decimal)>0)return f;}
-      return null;
-    }
-    function buildTip(sample,turn){
-      if(!sample)return '';
-      var work=estimatePowWork(sample.rawHex);
+    // Canonical series: indices match the drawn circles exactly (A11/A12).
+    var pts=buildPowSeries(CONFIG.POW_WINDOW).points;
+    function pointForIdx(idx){return pts[idx]||null;}
+    function buildTip(p){
+      if(!p)return '';
       var lines=[];
-      lines.push('<div style="font-size:12px;font-weight:700;margin-bottom:4px">'+escapeHtml(sample.observedAt?new Date(sample.observedAt).toLocaleTimeString():'')+'</div>');
-      lines.push('<div style="font-size:12px">PoW raw：<b>'+escapeHtml(sample.decimal?Number(sample.decimal).toLocaleString():'—')+'</b></div>');
-      lines.push('<div style="font-size:12px">估算工作量：<b>'+escapeHtml(Number.isFinite(work)?(work>=1000?(work/1000).toFixed(1)+'k×':work.toFixed(1)+'×'):'—')+'</b></div>');
-      if(sample.networkLabel)lines.push('<div style="font-size:12px">网络：'+escapeHtml(sample.networkLabel)+'</div>');
-      if(turn){
-        var st=statusInfo(turn);
+      var ts=p.observedAt?new Date(p.observedAt):null;
+      lines.push('<div style="font-size:12px;font-weight:700;margin-bottom:4px">'+escapeHtml(ts&&!Number.isNaN(ts.getTime())?ts.toLocaleTimeString():'')+'</div>');
+      lines.push('<div style="font-size:12px">PoW raw：<b>'+escapeHtml(p.decimal?Number(p.decimal).toLocaleString():'—')+'</b></div>');
+      lines.push('<div style="font-size:12px">估算工作量：<b>'+escapeHtml(Number.isFinite(p.work)?(p.work>=1000?(p.work/1000).toFixed(1)+'k×':p.work.toFixed(1)+'×'):'—')+'</b></div>');
+      if(p.networkLabel)lines.push('<div style="font-size:12px">网络：'+escapeHtml(p.networkLabel)+'</div>');
+      if(p.turnId){
+        var st=statusInfo(p);
         lines.push('<div style="font-size:12px;margin-top:4px;color:'+(st.tone==='danger'?'var(--danger)':st.tone==='conflict'?'var(--conflict)':st.tone==='normal'?'var(--normal)':st.tone==='warn'?'var(--warn)':'var(--muted)')+'">状态：'+escapeHtml(st.title)+'</div>');
-        if(turn.requestedModel)lines.push('<div style="font-size:12px">调用模型：'+escapeHtml(friendlyModelName(turn.requestedModel))+'</div>');
-        if(turn.assistantModel)lines.push('<div style="font-size:12px">应答模型：'+escapeHtml(friendlyModelName(turn.assistantModel))+'</div>');
-        if(turn.resolvedModel)lines.push('<div style="font-size:12px">服务器确认模型：'+escapeHtml(friendlyModelName(turn.resolvedModel))+'</div>');
-        if(turn.serverModel)lines.push('<div style="font-size:12px">服务器路由：'+escapeHtml(friendlyModelName(turn.serverModel))+'</div>');
-        var comp={coreCaptured:(turn.requestedModel?1:0)+(turn.assistantModel?1:0),allCaptured:(turn.requestedModel?1:0)+(turn.resolvedModel?1:0)+(turn.serverModel?1:0)+(turn.assistantModel?1:0)};
-        lines.push('<div style="font-size:12px">证据完整度：'+comp.allCaptured+'/4</div>');
-        if(turn.promptTopic||turn.promptPreview)lines.push('<div style="font-size:12px;color:var(--muted);margin-top:4px">“'+escapeHtml(clipText(turn.promptTopic||turn.promptPreview,40))+'”</div>');
+        if(p.requestedModel)lines.push('<div style="font-size:12px">调用模型：'+escapeHtml(friendlyModelName(p.requestedModel))+'</div>');
+        if(p.assistantModel)lines.push('<div style="font-size:12px">应答模型：'+escapeHtml(friendlyModelName(p.assistantModel))+'</div>');
+        if(p.resolvedModel)lines.push('<div style="font-size:12px">服务器确认模型：'+escapeHtml(friendlyModelName(p.resolvedModel))+'</div>');
+        if(p.serverModel)lines.push('<div style="font-size:12px">服务器路由：'+escapeHtml(friendlyModelName(p.serverModel))+'</div>');
+        var allCaptured=(p.requestedModel?1:0)+(p.resolvedModel?1:0)+(p.serverModel?1:0)+(p.assistantModel?1:0);
+        lines.push('<div style="font-size:12px">证据完整度：'+allCaptured+'/4</div>');
+        var topic=p.turn&&(p.turn.promptTopic||p.turn.promptPreview);
+        if(topic)lines.push('<div style="font-size:12px;color:var(--muted);margin-top:4px">“'+escapeHtml(clipText(topic,40))+'”</div>');
       }else{
         lines.push('<div style="font-size:12px;color:var(--muted)">未关联模型记录</div>');
       }
@@ -2063,10 +2109,9 @@ powChart(samples){
       circle.style.cursor='pointer';
       circle.addEventListener('mouseenter',function(){
         var idx=parseInt(circle.getAttribute('data-pow-idx'),10);
-        var sample=sampleForIdx(idx);
-        var turn=findTurn(sample);
+        var p=pointForIdx(idx);
         if(!tip)return;
-        tip.innerHTML=buildTip(sample,turn);
+        tip.innerHTML=buildTip(p);
         tip.style.display='block';
         var wrap=el.querySelector('.pow-svg-wrap');var cRect=circle.getBoundingClientRect();
         if(wrap){
@@ -2082,9 +2127,8 @@ powChart(samples){
       circle.addEventListener('mouseleave',function(){if(tip)tip.style.display='none';});
       circle.addEventListener('click',function(){
         var idx=parseInt(circle.getAttribute('data-pow-idx'),10);
-        var sample=sampleForIdx(idx);
-        var turn=findTurn(sample);
-        if(turn&&tip){
+        var p=pointForIdx(idx);
+        if(p&&p.turnId&&tip){
           var pinned=tip.hasAttribute('data-pinned')&&tip.getAttribute('data-pinned')==='1';
           if(pinned){tip.removeAttribute('data-pinned');tip.style.display='none';}
           else{tip.setAttribute('data-pinned','1');tip.style.display='block';}
@@ -2237,25 +2281,76 @@ const TitleFlasher = {
  */
 
 const State = {
-  _last:null,_dedupe:new Map(),_historyWritten:new Set(),_powSeen:0,_hooks:{fetch:false,sse:false,pow:"waiting",ws:false},_sessionEntries:[],_latestPow:null,
-  powLinkStats:{LINKED_BY_TURN_ID:0,LINKED_BY_TIME:0,LINKED_BY_DECIMAL:0,UNLINKED:0,AMBIGUOUS:0},
+  _last:null,_dedupe:new Map(),_historyWritten:new Set(),_powSeen:0,_hooks:{fetch:false,sse:false,pow:"waiting",ws:false},_sessionEntries:[],_pendingPow:[],
+  powLinkStats:{linkedByActiveTurn:0,linkedByPendingClaim:0},
   setHooks(h){Object.assign(this._hooks,h)},
   hookHealth(){const h=this._hooks,overall=h.fetch&&h.sse?'READY':(h.fetch||h.sse)?'PARTIAL':'FAILED';return{overall,fetch:h.fetch,sse:h.sse,pow:h.pow,ws:h.ws}},
-  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const active=TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt?TurnAggregator.activeTurn:null;const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection,turnId:active?active.turnId:null};this._latestPow=enriched;addPowSample(enriched);if(active){TurnAggregator.associatePow(active,sample);this.powLinkStats.LINKED_BY_TURN_ID+=1;}else{this.powLinkStats.UNLINKED+=1;}postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
-  resetSession(){this._last=null;this._dedupe.clear();this._historyWritten.clear();this._sessionEntries=[];TurnAggregator.reset()},
+  recordPow(sample){
+    if(!loadSettings().powEnabled)return;
+    this._powSeen+=1;this._hooks.pow='observed';
+    const snap=currentNetworkSnapshot();
+    const powId=(sample&&sample.powId)||crypto.randomUUID();
+    const active=TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt?TurnAggregator.activeTurn:null;
+    const enriched={powId:powId,observedAt:(sample&&sample.observedAt)||nowIso(),rawHex:sample?sample.rawHex:null,decimal:sample?sample.decimal:null,networkLabel:snap.label,networkConnection:snap.connection,turnId:null,linkState:'pending'};
+    if(active){
+      // A8 Case B: turn already exists -> strongest direct association.
+      enriched.turnId=active.turnId;enriched.linkState='linked';
+      active.powId=powId;active.powRaw=enriched.rawHex;active.powDecimal=enriched.decimal;
+      this.powLinkStats.linkedByActiveTurn+=1;
+    }else{
+      // A6/A7 Case A: PoW arrived before its turn -> bounded pending queue.
+      this.enqueuePendingPow(enriched);
+    }
+    addPowSample(enriched);
+    postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen});
+  },
+  enqueuePendingPow(sample){
+    if(!sample||!sample.powId)return;
+    const q=this._pendingPow||(this._pendingPow=[]);
+    q.push(sample);
+    const now=Date.now();
+    for(let i=q.length-1;i>=0;i--){
+      const s=q[i];const ts=s&&s.observedAt?new Date(s.observedAt).getTime():0;
+      if(!ts||now-ts>CONFIG.PENDING_POW_TTL_MS)q.splice(i,1);
+    }
+    while(q.length>CONFIG.MAX_PENDING_POW)q.shift();
+  },
+  claimPendingPowForTurn(turn){
+    // A7: claim the newest safe eligible pending PoW (shortly BEFORE, in TTL, unclaimed).
+    if(!turn)return null;
+    const q=this._pendingPow||[];
+    const now=Date.now();
+    let best=null,bestIdx=-1,bestTs=0;
+    for(let i=0;i<q.length;i++){
+      const s=q[i];
+      if(!s||s.linkState!=='pending'||s.turnId)continue;
+      const ts=s.observedAt?new Date(s.observedAt).getTime():0;
+      if(!ts)continue;
+      if(now-ts>CONFIG.PENDING_POW_TTL_MS)continue;
+      if(ts>turn.startedAt+2000)continue;
+      if(!best||ts>bestTs){best=s;bestTs=ts;bestIdx=i;}
+    }
+    if(!best)return null;
+    best.turnId=turn.turnId;best.linkState='linked';
+    updatePowSample(best.powId,{turnId:turn.turnId,linkState:'linked'});
+    turn.powId=best.powId;turn.powRaw=best.rawHex;turn.powDecimal=best.decimal;
+    q.splice(bestIdx,1);
+    this.powLinkStats.linkedByPendingClaim+=1;
+    return best;
+  },
+  resetSession(){this._last=null;this._dedupe.clear();this._historyWritten.clear();this._sessionEntries=[];this._pendingPow=[];this.powLinkStats={linkedByActiveTurn:0,linkedByPendingClaim:0};TurnAggregator.reset()},
   historyForUi(){const persisted=loadHistory(),all=[...this._sessionEntries,...persisted],seen=new Set(),out=[];for(const x of all){const k=x.captureId||x.turnId||`${x.timestamp}:${x.messageId||x.conversationId||''}`;if(seen.has(k))continue;seen.add(k);out.push(x);if(out.length>=CONFIG.MAX_HISTORY)break;}return out},
   // v1.5: emitTurn called by TurnAggregator after finalization.
   emitTurn(turn){
-    const pow=this._latestPow||null;
-    const entry={captureId:turn.turnId,turnId:turn.turnId,timestamp:turn.startedAt,conversationId:turn.conversationId||null,messageId:turn.messageId||null,requestedModel:turn.requestedModel||null,resolvedModel:turn.resolvedModel||null,assistantModel:turn.assistantModel||null,serverModel:turn.serverModel||null,requestedSource:turn.requestedSource||null,resolvedSource:turn.resolvedSource||null,assistantSource:turn.assistantSource||null,serverSource:turn.serverSource||null,promptPreview:turn.promptPreview||null,promptTopic:turn.promptTopic||null,replyPreview:turn.replyPreview||null,replyTopic:turn.replyTopic||null,replyIsCode:Boolean(turn.replyIsCode),internalMessages:Array.isArray(turn.internalMessages)?turn.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:turn.networkLabel||'',networkConnection:turn.networkConnection||null,powRaw:turn.powRaw||(pow&&pow.rawHex)||null,powDecimal:turn.powDecimal||(pow&&pow.decimal)||null,transport:Object.keys(turn.transportsSeen||{}).join(',')||'fetch',transportsSeen:turn.transportsSeen||{}};
+    const entry={captureId:turn.turnId,turnId:turn.turnId,timestamp:turn.startedAt,conversationId:turn.conversationId||null,messageId:turn.messageId||null,requestedModel:turn.requestedModel||null,resolvedModel:turn.resolvedModel||null,assistantModel:turn.assistantModel||null,serverModel:turn.serverModel||null,requestedSource:turn.requestedSource||null,resolvedSource:turn.resolvedSource||null,assistantSource:turn.assistantSource||null,serverSource:turn.serverSource||null,promptPreview:turn.promptPreview||null,promptTopic:turn.promptTopic||null,replyPreview:turn.replyPreview||null,replyTopic:turn.replyTopic||null,replyIsCode:Boolean(turn.replyIsCode),internalMessages:Array.isArray(turn.internalMessages)?turn.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:turn.networkLabel||'',networkConnection:turn.networkConnection||null,powId:turn.powId||null,powRaw:turn.powRaw||null,powDecimal:turn.powDecimal||null,transport:Object.keys(turn.transportsSeen||{}).join(',')||'fetch',transportsSeen:turn.transportsSeen||{}};
     const result=runVerdict({requested:entry.requestedModel,resolved:entry.resolvedModel,resolvedSource:entry.resolvedSource,server:entry.serverModel,serverSource:entry.serverSource,assistant:entry.assistantModel,assistantSource:entry.assistantSource});
     entry.verdict=result.verdict;entry.confidence=result.confidence;entry.evidenceConflict=result.verdict===VERDICT.EVIDENCE_CONFLICT;entry.reasons=result.reasons;
     this._last=entry;const key=entry.captureId||entry.messageId||entry.conversationId||entry.timestamp;if(this._historyWritten.has(key)){Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();return;}this._historyWritten.add(key);if(this._historyWritten.size>300){const o=this._historyWritten.keys().next().value;if(o!==undefined)this._historyWritten.delete(o)}this._sessionEntries.unshift(entry);this._sessionEntries=this._sessionEntries.slice(0,CONFIG.MAX_HISTORY);addHistoryEntry(entry);postBus(MSG_TYPE.ROUTE_RESULT,persistableEntry(entry));this.alert(entry);Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();
   },
   handleRouteEvidence(evidence){
     const result=runVerdict({requested:evidence.requestedModel||null,resolved:evidence.resolvedModel||null,resolvedSource:evidence.resolvedSource||null,server:evidence.serverModel||null,serverSource:evidence.serverSource||null,assistant:evidence.assistantModel||null,assistantSource:evidence.assistantSource||null});
-    const pow=loadPowHistory()[0]||null,network=evidence.network||currentNetworkSnapshot();
-    const entry={turnId:evidence.captureId||crypto.randomUUID(),captureId:evidence.captureId||crypto.randomUUID(),timestamp:Date.now(),conversationId:evidence.conversationId||null,messageId:evidence.messageId||null,requestedModel:evidence.requestedModel||null,resolvedModel:evidence.resolvedModel||null,assistantModel:evidence.assistantModel||null,serverModel:evidence.serverModel||null,requestedSource:evidence.requestedSource||null,resolvedSource:evidence.resolvedSource||null,assistantSource:evidence.assistantSource||null,serverSource:evidence.serverSource||null,promptPreview:evidence.promptPreview||null,promptTopic:evidence.promptTopic||null,replyPreview:evidence.replyPreview||null,replyTopic:evidence.replyTopic||null,replyIsCode:Boolean(evidence.replyIsCode),internalMessages:Array.isArray(evidence.internalMessages)?evidence.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:network.label||'',networkConnection:network.connection||null,powRaw:pow&&pow.rawHex||null,powDecimal:pow&&pow.decimal||null,verdict:result.verdict,confidence:result.confidence,transport:evidence.transport||'fetch',evidenceConflict:result.verdict===VERDICT.EVIDENCE_CONFLICT,reasons:result.reasons};
+    const network=evidence.network||currentNetworkSnapshot();
+    const entry={turnId:evidence.captureId||crypto.randomUUID(),captureId:evidence.captureId||crypto.randomUUID(),timestamp:Date.now(),conversationId:evidence.conversationId||null,messageId:evidence.messageId||null,requestedModel:evidence.requestedModel||null,resolvedModel:evidence.resolvedModel||null,assistantModel:evidence.assistantModel||null,serverModel:evidence.serverModel||null,requestedSource:evidence.requestedSource||null,resolvedSource:evidence.resolvedSource||null,assistantSource:evidence.assistantSource||null,serverSource:evidence.serverSource||null,promptPreview:evidence.promptPreview||null,promptTopic:evidence.promptTopic||null,replyPreview:evidence.replyPreview||null,replyTopic:evidence.replyTopic||null,replyIsCode:Boolean(evidence.replyIsCode),internalMessages:Array.isArray(evidence.internalMessages)?evidence.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:network.label||'',networkConnection:network.connection||null,powId:null,powRaw:null,powDecimal:null,verdict:result.verdict,confidence:result.confidence,transport:evidence.transport||'fetch',evidenceConflict:result.verdict===VERDICT.EVIDENCE_CONFLICT,reasons:result.reasons};
     this._last=entry;const key=entry.captureId||entry.messageId||entry.conversationId||entry.timestamp;if(this._historyWritten.has(key)){Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();return;}this._historyWritten.add(key);if(this._historyWritten.size>300){const o=this._historyWritten.keys().next().value;if(o!==undefined)this._historyWritten.delete(o)}this._sessionEntries.unshift(entry);this._sessionEntries=this._sessionEntries.slice(0,CONFIG.MAX_HISTORY);addHistoryEntry(entry);postBus(MSG_TYPE.ROUTE_RESULT,persistableEntry(entry));this.alert(entry);Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();
   },
   alert(entry){
@@ -2778,6 +2873,89 @@ window.__chatgptModelDowngradeMonitor = {
       verdict: t.verdict || t.primaryVerdict
     };
   },
+  // ---- v1.5 PoW link debug + regression hooks (local-only, no network) ----
+  debugPowLinks() {
+    var series=buildPowSeries(CONFIG.POW_WINDOW);
+    var pts=series.points;
+    var by=function(st){return pts.filter(function(p){return p.linkState===st;}).length;};
+    return {
+      totalSamples:loadPowHistory().length,
+      pending:(State._pendingPow||[]).length,
+      linkedByActiveTurn:State.powLinkStats.linkedByActiveTurn,
+      linkedByPendingClaim:State.powLinkStats.linkedByPendingClaim,
+      legacyLinkedByTime:by("legacy"),
+      unlinked:by("unlinked"),
+      ambiguous:by("ambiguous"),
+      lastSamples:pts.slice(-5).map(function(p){return {powId:p.powId,observedAt:p.observedAt,turnId:p.turnId,linkState:p.linkState,verdict:p.verdict};})
+    };
+  },
+  _powTestReset() { State.resetSession(); TurnAggregator.reset(); },
+  // TEST A: PoW arrives 500ms BEFORE turn -> pending PoW claimed by that turn.
+  testPowBeforeTurn() {
+    this._powTestReset();
+    State.recordPow({rawHex:"1a2b3c",decimal:BigInt("0x1a2b3c").toString(10),observedAt:new Date(Date.now()-500).toISOString()});
+    var pendingBefore=(State._pendingPow||[]).length;
+    var turn=TurnAggregator.getOrCreateActiveTurn("pow-stream-a","POW-C-A");
+    var first=loadPowHistory()[0]||null;
+    return {pendingBefore:pendingBefore,claimedPowId:turn.powId||null,sampleTurnId:first?first.turnId:null,sampleLinkState:first?first.linkState:null,linkedByPendingClaim:State.powLinkStats.linkedByPendingClaim,pass:Boolean(turn.powId)&&Boolean(first)&&first.turnId===turn.turnId&&first.linkState==="linked"};
+  },
+  // TEST B: Turn exists first, then PoW arrives -> immediate association.
+  testPowAfterTurn() {
+    this._powTestReset();
+    var turn=TurnAggregator.getOrCreateActiveTurn("pow-stream-b","POW-C-B");
+    State.recordPow({rawHex:"abcdef",decimal:BigInt("0xabcdef").toString(10),observedAt:nowIso()});
+    var first=loadPowHistory()[0]||null;
+    return {turnPowId:turn.powId||null,sampleTurnId:first?first.turnId:null,linkedByActiveTurn:State.powLinkStats.linkedByActiveTurn,pass:Boolean(turn.powId)&&Boolean(first)&&first.turnId===turn.turnId};
+  },
+  // TEST C: PoW older than TTL, then unrelated turn begins -> PoW stays unlinked.
+  testStalePow() {
+    this._powTestReset();
+    State.recordPow({rawHex:"777777",decimal:BigInt("0x777777").toString(10),observedAt:new Date(Date.now()-CONFIG.PENDING_POW_TTL_MS-2000).toISOString()});
+    var turn=TurnAggregator.getOrCreateActiveTurn("pow-stream-c","POW-C-C");
+    var first=loadPowHistory()[0]||null;
+    var point=(buildPowSeries(CONFIG.POW_WINDOW).points.filter(function(p){return p.powId===(first&&first.powId);})[0])||null;
+    return {claimedPowId:turn.powId||null,pending:(State._pendingPow||[]).length,canonicalPhase:point?point.phase:null,pass:!turn.powId&&(State._pendingPow||[]).length===0};
+  },
+  // TEST D: two PoW samples share the same decimal -> no identity collision.
+  testRepeatedDecimal() {
+    this._powTestReset();
+    State.recordPow({rawHex:"1000",decimal:"4096",observedAt:new Date(Date.now()-1000).toISOString()});
+    var id1=(loadPowHistory()[0]||{}).powId||null;
+    State.recordPow({rawHex:"1000",decimal:"4096",observedAt:new Date(Date.now()-400).toISOString()});
+    var id2=(loadPowHistory()[0]||{}).powId||null;
+    var turn=TurnAggregator.getOrCreateActiveTurn("pow-stream-d","POW-C-D");
+    var claimed=loadPowHistory().filter(function(s){return s.turnId===turn.turnId;});
+    return {powId1:id1,powId2:id2,distinctIds:Boolean(id1)&&Boolean(id2)&&id1!==id2,claimedCount:claimed.length,pass:Boolean(id1)&&Boolean(id2)&&id1!==id2&&claimed.length===1};
+  },
+  // TEST E/F: mini tail equals canonical full tail.
+  testMiniTail(count) {
+    var series=buildPowSeries(CONFIG.POW_WINDOW);
+    var tail=series.points.slice(-count);
+    var shape=function(a){return a.map(function(p){return {id:p.powId,w:p.work,ph:p.phase};});};
+    return {requested:count,length:tail.length,powIds:tail.map(function(p){return p.powId;}),works:tail.map(function(p){return p.work;}),phases:tail.map(function(p){return p.phase;}),equalsCanonicalTail:JSON.stringify(shape(tail))===JSON.stringify(shape(series.points.slice(-count)))};
+  },
+  testMiniTail9(){return this.testMiniTail(9);},
+  testMiniTail18(){return this.testMiniTail(18);},
+  // TEST G: pulse bends through actual corners, never a straight chord.
+  testSharpCornerPulse() {
+    try{FloatingMonitor.ensure();FloatingMonitor.maybeStartAnim();FloatingMonitor.drawWave();}catch(e){}
+    var d=FloatingMonitor._lastPathD||"";
+    var svgEl=(FloatingMonitor.root&&FloatingMonitor.root.querySelector)?FloatingMonitor.root.querySelector('.wave-svg'):null;
+    var overlayEl=svgEl&&svgEl.querySelector?svgEl.querySelector('#pulse-main'):null;
+    var overlayD=overlayEl?overlayEl.getAttribute('d'):null;
+    var corners=(d.match(/L/g)||[]).length;
+    return {available:Boolean(d),corners:corners,overlayPresent:Boolean(overlayEl),pulseUsesExactPath:Boolean(overlayD)&&overlayD===d,noChord:Boolean(overlayD)&&(overlayD.match(/L/g)||[]).length>=2,pass:corners>=2&&Boolean(overlayD)&&overlayD===d};
+  },
+  // TEST H: loop wrap has a smooth fade envelope, no hard break.
+  testLoopWrap() {
+    var L=1000;
+    var e0=FloatingMonitor._pulseEnvelope(0,L);
+    var emid=FloatingMonitor._pulseEnvelope(L*0.5,L);
+    var eEnd=FloatingMonitor._pulseEnvelope(L*0.99,L);
+    var maxStep=0;
+    for(var i=1;i<=1000;i++){var g=Math.abs(FloatingMonitor._pulseEnvelope(L*i/1000,L)-FloatingMonitor._pulseEnvelope(L*(i-1)/1000,L));if(g>maxStep)maxStep=g;}
+    return {envelopeStart:e0,envelopeMid:emid,envelopeEnd:eEnd,maxStep:maxStep,pass:e0===0&&emid===1&&eEnd<1&&maxStep<0.2};
+  },
   // v1.5 CASE A: Fetch + WS same messageId => ONE turn, no duplication, 4/4 evidence
   testRegCaseA() {
     State.resetSession();
@@ -2849,7 +3027,7 @@ window.__chatgptModelDowngradeMonitor = {
       historyLen: loadHistory().length
     };
   },
-  _internals: { Network, State, TurnAggregator, SSEParser: createSSEParser }
+  _internals: { Network, State, TurnAggregator, SSEParser: createSSEParser, FloatingMonitor, buildPowSeries, updatePowSample, powSemanticPhase, powSemanticColor, mixCssColor }
 };
 
 window.__chatgptGuardPro = window.__chatgptModelDowngradeMonitor; // v1.x compatibility
