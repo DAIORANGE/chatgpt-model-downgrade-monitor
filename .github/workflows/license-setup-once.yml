@@ -1,0 +1,187 @@
+name: license-setup-once
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[license-setup-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Add PolyForm Noncommercial license and commercial licensing notice
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # Userscript metadata
+          script = Path('ChatGPT-Model-Downgrade-Monitor.user.js')
+          s = script.read_text(encoding='utf-8')
+          marker = '// @author       DAIORANGE\n'
+          license_line = '// @license      PolyForm-Noncommercial-1.0.0\n'
+          if license_line not in s:
+              if marker not in s:
+                  raise SystemExit('userscript author marker not found')
+              s = s.replace(marker, marker + license_line, 1)
+              script.write_text(s, encoding='utf-8', newline='')
+
+          # Canonical LICENSE text from PolyForm Noncommercial 1.0.0.
+          license_text = '''PolyForm Noncommercial License 1.0.0
+
+https://polyformproject.org/licenses/noncommercial/1.0.0
+
+Required Notice: Copyright 2026 DAIORANGE.
+
+Acceptance
+
+In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
+
+Copyright License
+
+The licensor grants you a copyright license for the software to do everything you might do with the software that would otherwise infringe the licensor's copyright in it for any permitted purpose. However, you may only distribute the software according to Distribution License and make changes or new works based on the software according to Changes and New Works License.
+
+Distribution License
+
+The licensor grants you an additional copyright license to distribute copies of the software. Your license to distribute covers distributing the software with changes and new works permitted by Changes and New Works License.
+
+Notices
+
+You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software. For example:
+
+> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
+
+Changes and New Works License
+
+The licensor grants you an additional copyright license to make changes and new works based on the software for any permitted purpose.
+
+Patent License
+
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software.
+
+Noncommercial Purposes
+
+Any noncommercial purpose is a permitted purpose.
+
+Personal Uses
+
+Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, amateur pursuits, or religious observance, without any anticipated commercial application, is use for a permitted purpose.
+
+Noncommercial Organizations
+
+Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.
+
+Fair Use
+
+You may have "fair use" rights for the software under the law. These terms do not limit them.
+
+No Other Rights
+
+These terms do not allow you to sublicense or transfer any of your licenses to anyone else, or prevent the licensor from granting licenses to anyone else. These terms do not imply any other licenses.
+
+Patent Defense
+
+If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+
+Violations
+
+The first time you are notified in writing that you have violated any of these terms, or done anything with the software not covered by your licenses, your licenses can nonetheless continue if you come into full compliance with these terms, and take practical steps to correct past violations, within 32 days of receiving notice. Otherwise, all your licenses end immediately.
+
+No Liability
+
+As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.
+
+Definitions
+
+The licensor is the individual or entity offering these terms, and the software is the software the licensor makes available under these terms.
+
+You refers to the individual or entity agreeing to these terms.
+
+Your company is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. Control means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.
+
+Your licenses are all the licenses granted to you for the software under these terms.
+
+Use means anything you do with the software requiring one of your licenses.
+
+© PolyForm Project Inc.
+'''
+          Path('LICENSE').write_text(license_text, encoding='utf-8', newline='')
+
+          zh_section = '''## 许可证与商业授权
+
+本项目源码以 **PolyForm Noncommercial License 1.0.0** 提供。
+
+- 个人、学习、研究、业余项目及其他符合该许可证定义的**非商业用途**可以在许可证条款范围内使用、修改和分发；
+- 该许可证**不授予商业使用权**；
+- 如需商业使用、商业集成、收费分发，或希望获得其他商业授权，请联系作者 **DAIORANGE** 另行授权；
+- 赞助 / 打赏属于对作者维护工作的自愿支持，**不会自动授予额外的商业使用权或其他许可权利**。
+
+完整条款见 [LICENSE](LICENSE) 与 PolyForm Noncommercial 1.0.0 官方文本。
+
+'''
+          readme = Path('README.md')
+          r = readme.read_text(encoding='utf-8')
+          if '## 许可证与商业授权\n' not in r:
+              anchor = '## 隐私\n'
+              if anchor not in r:
+                  raise SystemExit('README zh privacy anchor not found')
+              r = r.replace(anchor, zh_section + anchor, 1)
+              readme.write_text(r, encoding='utf-8', newline='')
+
+          en_section = '''## License and commercial licensing
+
+This project is source-available under the **PolyForm Noncommercial License 1.0.0**.
+
+- Personal, educational, research, hobby, and other **noncommercial uses** permitted by the license may use, modify, and distribute the software within the license terms;
+- this license **does not grant commercial-use rights**;
+- for commercial use, commercial integration, paid distribution, or other commercial licensing, contact **DAIORANGE** for a separate license;
+- sponsorships or donations are voluntary support for project maintenance and **do not automatically grant additional commercial-use rights or other license rights**.
+
+See [LICENSE](LICENSE) and the official PolyForm Noncommercial 1.0.0 terms for the complete license.
+
+'''
+          readme_en = Path('README_EN.md')
+          e = readme_en.read_text(encoding='utf-8')
+          if '## License and commercial licensing\n' not in e:
+              anchor = '## Privacy\n'
+              if anchor not in e:
+                  raise SystemExit('README EN privacy anchor not found')
+              e = e.replace(anchor, en_section + anchor, 1)
+              readme_en.write_text(e, encoding='utf-8', newline='')
+
+          listing = Path('GREASYFORK_LISTING.md')
+          g = listing.read_text(encoding='utf-8')
+          gf_section = '''## License / 许可证
+PolyForm Noncommercial License 1.0.0 (`PolyForm-Noncommercial-1.0.0`).
+
+非商业用途可按许可证条款使用、修改和分发。商业使用、商业集成或收费分发请联系作者 DAIORANGE 另行授权。赞助 / 打赏不会自动授予商业使用权。
+
+Noncommercial use, modification, and distribution are permitted under the license terms. For commercial use, commercial integration, or paid distribution, contact DAIORANGE for a separate commercial license. Sponsorships or donations do not automatically grant commercial-use rights.
+
+'''
+          if '## License / 许可证\n' not in g:
+              anchor = '## Disclaimer\n'
+              if anchor not in g:
+                  raise SystemExit('Greasy Fork disclaimer anchor not found')
+              g = g.replace(anchor, gf_section + anchor, 1)
+              listing.write_text(g, encoding='utf-8', newline='')
+          PY
+
+          rm -f .github/workflows/license-setup-once.yml
+          node --check ChatGPT-Model-Downgrade-Monitor.user.js
+          sha256sum ChatGPT-Model-Downgrade-Monitor.user.js > ChatGPT-Model-Downgrade-Monitor.user.js.sha256
+
+          git config user.name "DAIORANGE"
+          git config user.email "121008037@qq.com"
+          git add -A
+          git commit -m "docs: adopt PolyForm Noncommercial licensing [license-setup-done]"
+          git push origin HEAD:main
