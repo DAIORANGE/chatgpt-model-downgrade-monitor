@@ -4,9 +4,22 @@
 
 **用可核对的网页证据，观察 ChatGPT 是否发生模型切换、路由变化或请求/应答不一致。**
 
-[English](README_EN.md) · [安装脚本](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
+[![Latest Release](https://img.shields.io/github/v/release/DAIORANGE/chatgpt-model-downgrade-monitor?display_name=tag&sort=semver)](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/latest)
+[![Userscript](https://img.shields.io/badge/userscript-Tampermonkey-00ad9f)](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
+[![Firefox](https://img.shields.io/badge/Firefox-primary%20target-ff7139)](https://www.mozilla.org/firefox/)
+[![JavaScript](https://img.shields.io/badge/JavaScript-ES2020+-f7df1e)](ChatGPT-Model-Downgrade-Monitor.user.js)
+
+[English](README_EN.md) · [安装脚本](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js) · [Releases](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases) · [Issues](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/issues)
 
 </div>
+
+## 最新版本
+
+当前公开版本：**v1.4.1**
+
+- [查看 Release](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/tag/v1.4.1)
+- [直接安装 userscript](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
+- [查看 SHA-256](ChatGPT-Model-Downgrade-Monitor.user.js.sha256)
 
 ## 为什么有这个项目
 
@@ -19,8 +32,6 @@
 - 希望不依赖 Chrome MV3 扩展，也能直接观察 ChatGPT 模型路由的人。
 
 它不会根据“回答变笨了”“速度变快了”“语气像 mini”这类主观感觉判断模型，而是比较 ChatGPT 网页请求与响应里实际可读取的模型字段。
-
-> 本项目是非官方工具，与 OpenAI / ChatGPT / Tampermonkey 均无隶属、授权或背书关系。
 
 ## 它看什么
 
@@ -144,6 +155,19 @@ PoW（Proof of Work）可以理解成：服务器在部分请求前要求浏览�
 - server route、resolved model、assistant model 是不同来源的证据，不能互相无条件替代；
 - RTT / downlink 来自浏览器网络信息估算，不等于代理节点到 OpenAI 的独立测速；
 - 本工具只能报告网页实际暴露给浏览器的字段，无法证明 OpenAI 内部所有未公开路由过程。
+
+## 免责声明
+
+**本项目是非官方、独立的社区工具，与 OpenAI、ChatGPT、Tampermonkey 及其运营方不存在隶属、合作、授权、赞助或背书关系。**
+
+- `ChatGPT`、`OpenAI` 及相关名称、标识和商标归其各自权利人所有；本项目使用这些名称仅用于说明兼容对象和技术用途。
+- 本工具只观察浏览器端实际可见的请求与响应字段。它不能代表、验证或证明 OpenAI 未公开的内部模型路由、计费逻辑、账号状态、风控结论或基础设施状态。
+- ChatGPT 网页和内部接口会持续变化，因此本项目可能随时出现字段缺失、检测失效、误判、漏判或兼容性问题；不承诺持续可用，也不保证检测结果完整或绝对准确。
+- PoW、RTT、downlink、server route 等均属于辅助观测数据，不能单独作为 IP 质量、账号健康、模型降级或官方服务状态的证明。
+- 本项目按现状提供。使用者需要自行判断结果，并自行承担安装、运行、调试和依赖网页内部接口变化所产生的风险。
+- 使用者有责任遵守适用的服务条款、浏览器扩展/userscript 平台规则以及所在地法律法规。
+
+如果你需要对账号、计费、订阅权益或官方服务状态做正式确认，请以 OpenAI 官方界面、官方文档和官方支持渠道为准。
 
 ## 搜索关键词
 
