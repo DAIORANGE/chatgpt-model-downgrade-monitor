@@ -118,6 +118,17 @@ This project was strongly informed by two public projects during research and de
 
 Thanks to both projects for publicly sharing their work and research direction. This project is an independent userscript implementation and does not imply endorsement by either project or its authors.
 
+## License and commercial licensing
+
+This project is source-available under the **PolyForm Noncommercial License 1.0.0**.
+
+- Personal, educational, research, hobby, and other **noncommercial uses** permitted by the license may use, modify, and distribute the software within the license terms;
+- this license **does not grant commercial-use rights**;
+- for commercial use, commercial integration, paid distribution, or other commercial licensing, contact **DAIORANGE** for a separate license;
+- sponsorships or donations are voluntary support for project maintenance and **do not automatically grant additional commercial-use rights or other license rights**.
+
+See [LICENSE](LICENSE) and the official PolyForm Noncommercial 1.0.0 terms for the complete license.
+
 ## Privacy
 
 Data is stored locally by default.

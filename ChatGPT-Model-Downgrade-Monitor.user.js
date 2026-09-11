@@ -8,6 +8,7 @@
 // @description:zh-CN  检测 ChatGPT 请求模型、服务器路由与最终应答模型是否一致，帮助发现静默模型切换、mini fallback 与路由冲突；重点面向 Firefox 及其他可安装 Tampermonkey 的桌面浏览器。
 // @description:en  Monitor requested, routed, resolved and assistant-reported ChatGPT models to surface silent model switches and routing conflicts, with Firefox/Tampermonkey compatibility as a primary goal.
 // @author       DAIORANGE
+// @license      PolyForm-Noncommercial-1.0.0
 // @homepageURL  https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor
 // @supportURL   https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/issues
 // @downloadURL  https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js

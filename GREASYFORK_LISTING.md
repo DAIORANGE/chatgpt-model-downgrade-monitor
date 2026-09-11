@@ -33,6 +33,13 @@ ChatGPT, model downgrade, silent downgrade, model routing, mini fallback, Firefo
 - ChatGPT Route Inspector: https://github.com/Liu-Bot24/chatgpt-route-inspector
 - GPT-Monitor: https://github.com/Kaede-118/GPT-Monitor
 
+## License / 许可证
+PolyForm Noncommercial License 1.0.0 (`PolyForm-Noncommercial-1.0.0`).
+
+非商业用途可按许可证条款使用、修改和分发。商业使用、商业集成或收费分发请联系作者 DAIORANGE 另行授权。赞助 / 打赏不会自动授予商业使用权。
+
+Noncommercial use, modification, and distribution are permitted under the license terms. For commercial use, commercial integration, or paid distribution, contact DAIORANGE for a separate commercial license. Sponsorships or donations do not automatically grant commercial-use rights.
+
 ## Disclaimer
 This is an unofficial independent community userscript. It is not affiliated with, authorized by, sponsored by, or endorsed by OpenAI, ChatGPT, Tampermonkey, or the referenced projects. It can only observe fields exposed to the browser and cannot prove undisclosed internal routing, billing, account-state or anti-abuse decisions. ChatGPT web changes may cause temporary breakage, false positives or false negatives.
 
