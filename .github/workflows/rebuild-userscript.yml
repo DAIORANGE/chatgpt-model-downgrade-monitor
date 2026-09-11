@@ -1,13 +1,42 @@
-name: Rebuild userscript from staged parts
+name: Diagnose staged userscript parts
 
 on:
+  push:
+    paths:
+      - '.github/workflows/rebuild-userscript.yml'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  rebuild:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
-      - run: echo 'Staging clean userscript parts; automatic rebuild temporarily paused.'
+      - uses: actions/checkout@v4
+      - name: Diagnose each base64 part
+        shell: bash
+        run: |
+          set -u
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, re, hashlib
+          alpha = re.compile(rb'^[A-Za-z0-9+/=\r\n\t ]*$')
+          for f in sorted(Path('.parts').glob('part*.b64')):
+              b=f.read_bytes()
+              clean=b''.join(b.split())
+              okchars=bool(alpha.match(b))
+              try:
+                  d=base64.b64decode(clean, validate=True)
+                  status=f'OK decoded={len(d)} sha8={hashlib.sha256(d).hexdigest()[:8]}'
+              except Exception as e:
+                  status=f'FAIL {type(e).__name__}: {e}'
+              print(f'{f.name} bytes={len(b)} clean={len(clean)} mod4={len(clean)%4} chars={okchars} {status}')
+          raw=b''.join(b''.join(f.read_bytes().split()) for f in sorted(Path('.parts').glob('part*.b64')))
+          print('CONCAT clean=',len(raw),'mod4=',len(raw)%4)
+          try:
+              d=base64.b64decode(raw, validate=True)
+              print('CONCAT OK decoded=',len(d),'sha256=',hashlib.sha256(d).hexdigest())
+          except Exception as e:
+              print('CONCAT FAIL',type(e).__name__,e)
+          PY
