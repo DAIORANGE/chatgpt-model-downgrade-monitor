@@ -22,8 +22,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .gzparts/part*.b64 > /tmp/userscript.gz.b64
-          base64 -d /tmp/userscript.gz.b64 | gzip -d > ChatGPT-Model-Downgrade-Monitor.user.js
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+
+          target = '01c7ec96e8bd88df187f2bfed3192670e3ce66c941d3f9bb55142a2c537eee38'
+          p1 = Path('.gzparts/part01.b64').read_text().strip()
+          p2 = Path('.gzparts/part02.b64').read_text().strip()
+          p3 = Path('.gzparts/part03.b64').read_text().strip()
+          p4 = Path('.gzparts/part04.b64').read_text().strip()
+
+          print('chunk lengths:', len(p1), len(p2), len(p3), len(p4))
+          if len(p2) != 12357:
+              raise SystemExit(f'unexpected part02 length: {len(p2)}')
+
+          found = None
+          for i in range(len(p2)):
+              joined = p1 + p2[:i] + p2[i+1:] + p3 + p4
+              try:
+                  compressed = base64.b64decode(joined, validate=True)
+                  js = gzip.decompress(compressed)
+              except Exception:
+                  continue
+              digest = hashlib.sha256(js).hexdigest()
+              if digest == target:
+                  found = (i, p2[i], js)
+                  break
+
+          if found is None:
+              raise SystemExit('could not recover payload by deleting one extra character from part02')
+
+          i, ch, js = found
+          print(f'recovered payload: removed part02 index={i}, char={ch!r}, bytes={len(js)}')
+          Path('ChatGPT-Model-Downgrade-Monitor.user.js').write_bytes(js)
+          PY
+
           node --check ChatGPT-Model-Downgrade-Monitor.user.js
           sha256sum ChatGPT-Model-Downgrade-Monitor.user.js > ChatGPT-Model-Downgrade-Monitor.user.js.sha256
           grep -q '^01c7ec96e8bd88df187f2bfed3192670e3ce66c941d3f9bb55142a2c537eee38  ChatGPT-Model-Downgrade-Monitor.user.js$' ChatGPT-Model-Downgrade-Monitor.user.js.sha256
