@@ -47,6 +47,12 @@
 当字段互相不一致时，模型鉴定姬不会简单写一个“疑似降级”，而是告诉你：**哪几个字段不同、为什么触发这个状态、已捕获多少项证据。**
 
 ## 主要功能
+悬浮气泡
+
+默认：<img width="312" height="58" alt="image" src="https://github.com/user-attachments/assets/d84f8554-cca8-47c6-832e-4aa30d89c15b" />
+
+
+悬停：<img width="317" height="68" alt="image" src="https://github.com/user-attachments/assets/f2e63eb0-9b30-4300-95ce-d3c825aec1b6" />
 
 - 请求模型 → 最终应答模型的直接对照；
 - 同一轮 SSE 内部事件聚合，避免一问出现十几条重复历史；
@@ -55,6 +61,9 @@
 - 本地历史、节点标签、模型统计与异常统计；
 - PoW 趋势图与网络辅助观测；
 - **二次元友好多主题 UI**：内置 9 套日系 / 轻二次元 / 深浅色主题，可由用户自行切换；
+
+<img width="1484" height="1258" alt="image" src="https://github.com/user-attachments/assets/2b114c90-03d5-48a9-a52f-e06a472ab1c3" />
+
 - **尽量对小白友好**：PoW、RTT、服务器路由等技术概念提供可点击的 `ⓘ` 白话解释；
 - **设置项尽量带说明**：不仅告诉你开关叫什么，也尽量写清楚“打开以后会发生什么、什么时候有用”；
 - 异常弹窗、可选提示音、音量与试听；
