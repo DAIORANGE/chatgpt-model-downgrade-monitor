@@ -3,7 +3,7 @@
 // @name:zh-CN   ChatGPT Model Downgrade Monitor | 模型鉴定姬
 // @name:en      ChatGPT Model Downgrade Monitor
 // @namespace    chatgpt-model-downgrade-monitor
-// @version      1.5.0-rc.4
+// @version      1.5.0-rc.5
 // @description  Detect ChatGPT silent model downgrades, hidden model routing, mini fallbacks, and requested-vs-response model mismatches. Designed for Tampermonkey users on Firefox and Chromium-family browsers.
 // @description:zh-CN  检测 ChatGPT 请求模型、服务器路由与最终应答模型是否一致，帮助发现静默模型切换、mini fallback 与路由冲突；重点面向 Firefox 及其他可安装 Tampermonkey 的桌面浏览器。
 // @description:en  Monitor requested, routed, resolved and assistant-reported ChatGPT models to surface silent model switches and routing conflicts, with Firefox/Tampermonkey compatibility as a primary goal.
@@ -905,6 +905,17 @@ const TurnAggregator = {
 
     turn.lifecycle = LIFECYCLE.FINALIZED;
     turn.finalizedAt = Date.now();
+    // RC5: persist a compact semantic snapshot on the linked PoW sample so the
+    // historical verdict survives a page reload (runtime turns do not).
+    if (turn.powId) {
+      try {
+        updatePowSample(turn.powId, {
+          turnId: turn.turnId,
+          linkState: "linked",
+          semanticSnapshot: semanticSnapshotFromTurn(turn)
+        });
+      } catch (e) { /* fail open */ }
+    }
     this.finalized.push(turn);
     if (this.finalized.length > 100) this.finalized.shift();
     State.emitTurn(turn);
@@ -1449,14 +1460,89 @@ function powSemanticColor(phase,theme){
 // ONE builder for every PoW consumer (full chart + collapsed/expanded mini + tooltip + debug).
 // Ordering is always OLD -> NEW (left -> right); consumers take .slice(-N) for tails (A11/A12).
 // Association is powId <-> turnId only. powDecimal is never an identity (A10).
+// RC5: reconstruct machine-readable findings from a persisted history entry.
+// Old records may not carry findings, so derive them conservatively from the
+// verdict/evidenceConflict/models that WERE persisted. Never invent data.
+function findingsFromHistoryEntry(entry){
+  if(!entry)return [];
+  if(Array.isArray(entry.findings)&&entry.findings.length)return entry.findings.slice();
+  const out=[];
+  const v=entry.verdict;
+  if(v===VERDICT.NORMAL)out.push("CORE_MATCH");
+  else if(v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED){
+    out.push("REQUEST_RESPONSE_MISMATCH");
+    const rf=[entry.resolvedModel,entry.serverModel].filter(Boolean);
+    if(rf.length>=1&&entry.assistantModel&&rf.some(function(x){return x!==entry.assistantModel;}))out.push("ROUTE_EVIDENCE_CONFLICT");
+  }
+  else if(v===VERDICT.EVIDENCE_CONFLICT)out.push("ROUTE_EVIDENCE_CONFLICT");
+  else if(v===VERDICT.ROUTE_NOTICE)out.push("ROUTE_NOTICE");
+  else if(v)out.push("EVIDENCE_INCOMPLETE");
+  if(entry.evidenceConflict&&out.indexOf("ROUTE_EVIDENCE_CONFLICT")<0)out.push("ROUTE_EVIDENCE_CONFLICT");
+  return out;
+}
+function turnLikeFromHistoryEntry(entry){
+  if(!entry)return null;
+  return {
+    turnId:entry.turnId||entry.captureId||null,
+    primaryVerdict:entry.verdict||null,
+    verdict:entry.verdict||null,
+    findings:findingsFromHistoryEntry(entry),
+    requestedModel:entry.requestedModel||null,
+    resolvedModel:entry.resolvedModel||null,
+    serverModel:entry.serverModel||null,
+    assistantModel:entry.assistantModel||null,
+    finalizedAt:entry.timestamp||null
+  };
+}
+// RC5: self-sufficient semantic snapshot persisted onto the PoW sample.
+function semanticSnapshotFromTurn(turn){
+  if(!turn)return null;
+  return {
+    verdict:turn.primaryVerdict||turn.verdict||null,
+    findings:Array.isArray(turn.findings)?turn.findings.slice():[],
+    requestedModel:turn.requestedModel||null,
+    resolvedModel:turn.resolvedModel||null,
+    serverModel:turn.serverModel||null,
+    assistantModel:turn.assistantModel||null,
+    finalizedAt:turn.finalizedAt||Date.now()
+  };
+}
+function turnLikeFromSnapshot(snap){
+  if(!snap)return null;
+  return {
+    turnId:null,
+    primaryVerdict:snap.verdict||null,
+    verdict:snap.verdict||null,
+    findings:Array.isArray(snap.findings)?snap.findings.slice():[],
+    requestedModel:snap.requestedModel||null,
+    resolvedModel:snap.resolvedModel||null,
+    serverModel:snap.serverModel||null,
+    assistantModel:snap.assistantModel||null,
+    finalizedAt:snap.finalizedAt||null
+  };
+}
+// Guards the optional one-time snapshot backfill (exact match only).
+const POW_SNAPSHOT_BACKFILL_DONE = new Set();
+
 function buildPowSeries(limit){
   const cap=Number.isFinite(limit)&&limit>0?Math.min(limit,CONFIG.MAX_POW_SAMPLES):CONFIG.POW_WINDOW;
   const samples=loadPowHistory();
   const finalized=TurnAggregator&&Array.isArray(TurnAggregator.finalized)?TurnAggregator.finalized:[];
   const active=TurnAggregator&&TurnAggregator.activeTurn?TurnAggregator.activeTurn:null;
-  const turnById={};
-  for(let i=0;i<finalized.length;i++){const ft=finalized[i];if(ft&&ft.turnId)turnById[ft.turnId]=ft;}
-  if(active&&active.turnId)turnById[active.turnId]=active;
+  const liveTurnById={};
+  for(let i=0;i<finalized.length;i++){const ft=finalized[i];if(ft&&ft.turnId)liveTurnById[ft.turnId]=ft;}
+  if(active&&active.turnId)liveTurnById[active.turnId]=active;
+
+  // RC5: persisted model history participates in turn lookup. Runtime memory is
+  // wiped on reload, but history survives, so a valid link must not degrade.
+  const persistedTurnById={};
+  const persistedEntryById={};
+  const history=loadHistory();
+  for(let i=0;i<history.length;i++){
+    const e=history[i];if(!e)continue;
+    if(e.turnId&&!persistedTurnById[e.turnId]){persistedTurnById[e.turnId]=turnLikeFromHistoryEntry(e);persistedEntryById[e.turnId]=e;}
+    if(e.captureId&&!persistedTurnById[e.captureId]){persistedTurnById[e.captureId]=turnLikeFromHistoryEntry(e);persistedEntryById[e.captureId]=e;}
+  }
 
   const now=Date.now();
   const raw=[];
@@ -1467,20 +1553,39 @@ function buildPowSeries(limit){
     if(!Number.isFinite(work))continue;
 
     let linkState=p.linkState||(p.turnId?"linked":"unlinked");
-    let turn=p.turnId&&turnById[p.turnId]?turnById[p.turnId]:null;
+    let turn=null;
+    let hydrationSource="none";
 
-    if(!turn&&linkState==="linked")linkState="unlinked";
-    if(!turn&&linkState==="pending"){
-      const pendTs=p.observedAt?new Date(p.observedAt).getTime():0;
-      if(!pendTs||now-pendTs>CONFIG.PENDING_POW_TTL_MS)linkState="unlinked";
-    }
-    if(!turn&&linkState==="unlinked"&&!p.powId){
-      // Conservative legacy fallback: exact rawHex match to exactly ONE finalized turn.
-      // Ambiguous matches stay GRAY, never silently first-matched.
-      const matches=[];
-      for(let lk=finalized.length-1;lk>=0;lk--){const ft=finalized[lk];if(ft&&ft.powRaw&&ft.powRaw===p.rawHex)matches.push(ft);}
-      if(matches.length===1){turn=matches[0];linkState="legacy";}
-      else if(matches.length>1){linkState="ambiguous";}
+    // STEP 1 live runtime turn (active or finalized)
+    if(p.turnId&&liveTurnById[p.turnId]){turn=liveTurnById[p.turnId];hydrationSource="live-turn";}
+    // STEP 2 persisted model history by exact turnId / captureId
+    else if(p.turnId&&persistedTurnById[p.turnId]){turn=persistedTurnById[p.turnId];hydrationSource="persisted-history";}
+    // STEP 3 self-sufficient semantic snapshot stored on the PoW sample
+    else if(p.semanticSnapshot){turn=turnLikeFromSnapshot(p.semanticSnapshot);hydrationSource="semantic-snapshot";}
+
+    if(turn){
+      linkState="linked";
+      // STEP 9 optional one-time backfill, exact id match only.
+      if(hydrationSource==="persisted-history"&&!p.semanticSnapshot&&p.powId&&!POW_SNAPSHOT_BACKFILL_DONE.has(p.powId)){
+        POW_SNAPSHOT_BACKFILL_DONE.add(p.powId);
+        const entry=persistedEntryById[p.turnId];
+        const exact=Boolean(entry&&(entry.turnId===p.turnId||entry.captureId===p.turnId));
+        const snap=semanticSnapshotFromTurn(turn);
+        if(snap&&exact){try{updatePowSample(p.powId,{turnId:p.turnId,linkState:"linked",semanticSnapshot:snap});}catch(e){}}
+      }
+    } else {
+      if(linkState==="linked")linkState="unlinked";
+      if(linkState==="pending"){
+        const pendTs=p.observedAt?new Date(p.observedAt).getTime():0;
+        if(!pendTs||now-pendTs>CONFIG.PENDING_POW_TTL_MS)linkState="unlinked";
+      }
+      // STEP 4 conservative legacy fallback (pre-powId samples only).
+      if(linkState==="unlinked"&&!p.powId&&!p.semanticSnapshot){
+        const matches=[];
+        for(let lk=finalized.length-1;lk>=0;lk--){const ft=finalized[lk];if(ft&&ft.powRaw&&ft.powRaw===p.rawHex)matches.push(ft);}
+        if(matches.length===1){turn=matches[0];linkState="legacy";hydrationSource="legacy";}
+        else if(matches.length>1){linkState="ambiguous";}
+      }
     }
 
     const verdict=turn?(turn.primaryVerdict||turn.verdict||null):null;
@@ -1494,6 +1599,7 @@ function buildPowSeries(limit){
       decimal:p.decimal!==undefined&&p.decimal!==null?String(p.decimal):null,
       work:work,
       linkState:linkState,
+      hydrationSource:hydrationSource,
       phase:powSemanticPhase(linkState,verdict,hasConflict),
       verdict:verdict,
       findings:findings,
@@ -2360,7 +2466,7 @@ const State = {
   historyForUi(){const persisted=loadHistory(),all=[...this._sessionEntries,...persisted],seen=new Set(),out=[];for(const x of all){const k=x.captureId||x.turnId||`${x.timestamp}:${x.messageId||x.conversationId||''}`;if(seen.has(k))continue;seen.add(k);out.push(x);if(out.length>=CONFIG.MAX_HISTORY)break;}return out},
   // v1.5: emitTurn called by TurnAggregator after finalization.
   emitTurn(turn){
-    const entry={captureId:turn.turnId,turnId:turn.turnId,timestamp:turn.startedAt,conversationId:turn.conversationId||null,messageId:turn.messageId||null,requestedModel:turn.requestedModel||null,resolvedModel:turn.resolvedModel||null,assistantModel:turn.assistantModel||null,serverModel:turn.serverModel||null,requestedSource:turn.requestedSource||null,resolvedSource:turn.resolvedSource||null,assistantSource:turn.assistantSource||null,serverSource:turn.serverSource||null,promptPreview:turn.promptPreview||null,promptTopic:turn.promptTopic||null,replyPreview:turn.replyPreview||null,replyTopic:turn.replyTopic||null,replyIsCode:Boolean(turn.replyIsCode),internalMessages:Array.isArray(turn.internalMessages)?turn.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:turn.networkLabel||'',networkConnection:turn.networkConnection||null,powId:turn.powId||null,powRaw:turn.powRaw||null,powDecimal:turn.powDecimal||null,transport:Object.keys(turn.transportsSeen||{}).join(',')||'fetch',transportsSeen:turn.transportsSeen||{}};
+    const entry={captureId:turn.turnId,turnId:turn.turnId,timestamp:turn.startedAt,conversationId:turn.conversationId||null,messageId:turn.messageId||null,requestedModel:turn.requestedModel||null,resolvedModel:turn.resolvedModel||null,assistantModel:turn.assistantModel||null,serverModel:turn.serverModel||null,requestedSource:turn.requestedSource||null,resolvedSource:turn.resolvedSource||null,assistantSource:turn.assistantSource||null,serverSource:turn.serverSource||null,promptPreview:turn.promptPreview||null,promptTopic:turn.promptTopic||null,replyPreview:turn.replyPreview||null,replyTopic:turn.replyTopic||null,replyIsCode:Boolean(turn.replyIsCode),internalMessages:Array.isArray(turn.internalMessages)?turn.internalMessages.slice(0,CONFIG.MAX_INTERNAL_MESSAGES):[],networkLabel:turn.networkLabel||'',networkConnection:turn.networkConnection||null,powId:turn.powId||null,powRaw:turn.powRaw||null,powDecimal:turn.powDecimal||null,findings:Array.isArray(turn.findings)?turn.findings.slice():[],transport:Object.keys(turn.transportsSeen||{}).join(',')||'fetch',transportsSeen:turn.transportsSeen||{}};
     const result=runVerdict({requested:entry.requestedModel,resolved:entry.resolvedModel,resolvedSource:entry.resolvedSource,server:entry.serverModel,serverSource:entry.serverSource,assistant:entry.assistantModel,assistantSource:entry.assistantSource});
     entry.verdict=result.verdict;entry.confidence=result.confidence;entry.evidenceConflict=result.verdict===VERDICT.EVIDENCE_CONFLICT;entry.reasons=result.reasons;
     this._last=entry;const key=entry.captureId||entry.messageId||entry.conversationId||entry.timestamp;if(this._historyWritten.has(key)){Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();return;}this._historyWritten.add(key);if(this._historyWritten.size>300){const o=this._historyWritten.keys().next().value;if(o!==undefined)this._historyWritten.delete(o)}this._sessionEntries.unshift(entry);this._sessionEntries=this._sessionEntries.slice(0,CONFIG.MAX_HISTORY);addHistoryEntry(entry);postBus(MSG_TYPE.ROUTE_RESULT,persistableEntry(entry));this.alert(entry);Badge.setStatus(entry.verdict,entry.assistantModel||entry.resolvedModel||entry.serverModel||entry.requestedModel);if(Dashboard.open)Dashboard.render();
@@ -2898,6 +3004,7 @@ window.__chatgptModelDowngradeMonitor = {
     var series=buildPowSeries(CONFIG.POW_WINDOW);
     var pts=series.points;
     var by=function(st){return pts.filter(function(p){return p.linkState===st;}).length;};
+    var bySrc=function(s){return pts.filter(function(p){return p.hydrationSource===s;}).length;};
     return {
       totalSamples:loadPowHistory().length,
       pending:(State._pendingPow||[]).length,
@@ -2906,7 +3013,10 @@ window.__chatgptModelDowngradeMonitor = {
       legacyLinkedByTime:by("legacy"),
       unlinked:by("unlinked"),
       ambiguous:by("ambiguous"),
-      lastSamples:pts.slice(-5).map(function(p){return {powId:p.powId,observedAt:p.observedAt,turnId:p.turnId,linkState:p.linkState,verdict:p.verdict};})
+      hydratedFromLive:bySrc("live-turn"),
+      hydratedFromHistory:bySrc("persisted-history"),
+      hydratedFromSnapshot:bySrc("semantic-snapshot"),
+      lastSamples:pts.slice(-5).map(function(p){return {powId:p.powId,observedAt:p.observedAt,turnId:p.turnId,linkState:p.linkState,phase:p.phase,verdict:p.verdict,hydratedFrom:p.hydrationSource};})
     };
   },
   _powTestReset() { State.resetSession(); TurnAggregator.reset(); },
@@ -2946,6 +3056,89 @@ window.__chatgptModelDowngradeMonitor = {
     var turn=TurnAggregator.getOrCreateActiveTurn("pow-stream-d","POW-C-D");
     var claimed=loadPowHistory().filter(function(s){return s.turnId===turn.turnId;});
     return {powId1:id1,powId2:id2,distinctIds:Boolean(id1)&&Boolean(id2)&&id1!==id2,claimedCount:claimed.length,pass:Boolean(id1)&&Boolean(id2)&&id1!==id2&&claimed.length===1};
+  },
+  _powReloadFixture(sample,historyEntries){
+    State.resetSession();TurnAggregator.reset();
+    try{
+      this._powReloadSaved={pow:localStorage.getItem(CONFIG.STORAGE_POW_KEY),hist:localStorage.getItem(CONFIG.STORAGE_HISTORY_KEY)};
+    }catch(e){this._powReloadSaved=null;}
+    try{localStorage.setItem(CONFIG.STORAGE_POW_KEY,JSON.stringify(sample?[sample]:[]));}catch(e){}
+    try{localStorage.setItem(CONFIG.STORAGE_HISTORY_KEY,JSON.stringify(historyEntries||[]));}catch(e){}
+  },
+  _powReloadRestore(){
+    try{
+      if(!this._powReloadSaved)return;
+      if(this._powReloadSaved.pow===null)localStorage.removeItem(CONFIG.STORAGE_POW_KEY);else localStorage.setItem(CONFIG.STORAGE_POW_KEY,this._powReloadSaved.pow);
+      if(this._powReloadSaved.hist===null)localStorage.removeItem(CONFIG.STORAGE_HISTORY_KEY);else localStorage.setItem(CONFIG.STORAGE_HISTORY_KEY,this._powReloadSaved.hist);
+      this._powReloadSaved=null;
+    }catch(e){}
+  },
+  _powReloadPoint(powId){
+    var pts=buildPowSeries(CONFIG.POW_WINDOW).points;
+    for(var i=0;i<pts.length;i++){if(pts[i].powId===powId)return pts[i];}
+    return null;
+  },
+  // TEST 11: NORMAL link survives reload via persisted history.
+  testReloadNormal(){
+    this._powReloadFixture({powId:"P1",turnId:"T1",linkState:"linked",observedAt:nowIso(),rawHex:"1000",decimal:"4096",networkLabel:"fixture"},
+      [{turnId:"T1",captureId:"T1",timestamp:Date.now(),verdict:"NORMAL",requestedModel:"gpt-5-6-thinking",resolvedModel:"gpt-5-6-thinking",serverModel:"gpt-5-6-thinking",assistantModel:"gpt-5-6-thinking"}]);
+    var p=this._powReloadPoint("P1");
+    var out={found:Boolean(p),turnId:p?p.turnId:null,linkState:p?p.linkState:null,phase:p?p.phase:null,hydratedFrom:p?p.hydrationSource:null,pass:Boolean(p)&&p.linkState==="linked"&&p.phase==="normal"};
+    this._powReloadRestore();
+    return out;
+  },
+  // TEST 12: mismatch link stays RED after reload.
+  testReloadMismatch(){
+    this._powReloadFixture({powId:"P2",turnId:"T2",linkState:"linked",observedAt:nowIso(),rawHex:"2000",decimal:"8192",networkLabel:"fixture"},
+      [{turnId:"T2",captureId:"T2",timestamp:Date.now(),verdict:"MODEL_MISMATCH",requestedModel:"gpt-5-6-thinking",assistantModel:"gpt-5-5-mini"}]);
+    var p=this._powReloadPoint("P2");
+    var out={found:Boolean(p),phase:p?p.phase:null,hydratedFrom:p?p.hydrationSource:null,pass:Boolean(p)&&p.linkState==="linked"&&(p.phase==="mismatch"||p.phase==="mismatch-conflict")};
+    this._powReloadRestore();
+    return out;
+  },
+  // TEST 13: conflict link stays PURPLE after reload.
+  testReloadConflict(){
+    this._powReloadFixture({powId:"P3",turnId:"T3",linkState:"linked",observedAt:nowIso(),rawHex:"3000",decimal:"12288",networkLabel:"fixture"},
+      [{turnId:"T3",captureId:"T3",timestamp:Date.now(),verdict:"EVIDENCE_CONFLICT",requestedModel:"gpt-5-6-thinking",resolvedModel:"gpt-5-6-thinking",assistantModel:"gpt-5-5-mini"}]);
+    var p=this._powReloadPoint("P3");
+    var out={found:Boolean(p),phase:p?p.phase:null,hydratedFrom:p?p.hydrationSource:null,pass:Boolean(p)&&p.linkState==="linked"&&p.phase==="conflict"};
+    this._powReloadRestore();
+    return out;
+  },
+  // TEST 14: genuinely unlinked sample stays GRAY after reload.
+  testReloadUnlinked(){
+    this._powReloadFixture({powId:"P4",turnId:null,linkState:"unlinked",observedAt:nowIso(),rawHex:"4000",decimal:"16384",networkLabel:"fixture"},[]);
+    var p=this._powReloadPoint("P4");
+    var out={found:Boolean(p),phase:p?p.phase:null,hydratedFrom:p?p.hydrationSource:null,pass:Boolean(p)&&p.phase==="unlinked"};
+    this._powReloadRestore();
+    return out;
+  },
+  // Extra: semantic snapshot alone is enough (no history entry).
+  testReloadSnapshot(){
+    this._powReloadFixture({powId:"P5",turnId:"T5",linkState:"linked",observedAt:nowIso(),rawHex:"5000",decimal:"20480",networkLabel:"fixture",semanticSnapshot:{verdict:"NORMAL",findings:["CORE_MATCH"],requestedModel:"gpt-5-6-thinking",assistantModel:"gpt-5-6-thinking",finalizedAt:Date.now()}},[]);
+    var p=this._powReloadPoint("P5");
+    var out={found:Boolean(p),phase:p?p.phase:null,hydratedFrom:p?p.hydrationSource:null,pass:Boolean(p)&&p.linkState==="linked"&&p.phase==="normal"&&p.hydrationSource==="semantic-snapshot"};
+    this._powReloadRestore();
+    return out;
+  },
+  // TEST 5: finalization persists a compact semanticSnapshot onto the linked sample.
+  testSnapshotOnFinalize(){
+    var savedPow=null,savedHist=null;
+    try{savedPow=localStorage.getItem(CONFIG.STORAGE_POW_KEY);savedHist=localStorage.getItem(CONFIG.STORAGE_HISTORY_KEY);}catch(e){}
+    this._powTestReset();
+    var st=loadSettings();if(!st.powEnabled){st.powEnabled=true;saveSettings(st);}
+    State.recordPow({rawHex:"6000",decimal:"24576",observedAt:nowIso()});
+    var turn=TurnAggregator.getOrCreateActiveTurn("s-snap","C-SNAP");
+    turn.requestedModel="gpt-5-6-thinking";turn.assistantModel="gpt-5-6-thinking";
+    TurnAggregator.markStreamDone("s-snap");
+    if(TurnAggregator.graceTimer){clearTimeout(TurnAggregator.graceTimer);TurnAggregator.graceTimer=null;}
+    TurnAggregator.finalizeActiveTurn();
+    var sample=null;var all=loadPowHistory();
+    for(var i=0;i<all.length;i++){if(all[i]&&all[i].powId===turn.powId){sample=all[i];break;}}
+    var snap=sample&&sample.semanticSnapshot?sample.semanticSnapshot:null;
+    var out={powId:turn.powId||null,hasSnapshot:Boolean(snap),snapshotVerdict:snap?snap.verdict:null,pass:Boolean(snap)&&snap.verdict==="NORMAL"};
+    try{ if(savedPow===null)localStorage.removeItem(CONFIG.STORAGE_POW_KEY);else localStorage.setItem(CONFIG.STORAGE_POW_KEY,savedPow); if(savedHist===null)localStorage.removeItem(CONFIG.STORAGE_HISTORY_KEY);else localStorage.setItem(CONFIG.STORAGE_HISTORY_KEY,savedHist);}catch(e){}
+    return out;
   },
   // TEST E/F: mini tail equals canonical full tail.
   testMiniTail(count) {
