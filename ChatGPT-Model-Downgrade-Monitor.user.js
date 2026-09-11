@@ -72,6 +72,7 @@ const CONFIG = {
     powEnabled: true,
     wsFallbackEnabled: true,
     persistChatSummaries: true,
+    floatingAnimEnabled: true,
     networkLabel: "未命名网络",
     conceptPinPositions: {},
     badgePosition: null,
@@ -992,7 +993,15 @@ const TurnAggregator = {
     this.graceTimer = null;
     this.turnsByMessageId.clear();
     this.seenEvidenceKeys.clear();
-  }
+  },
+
+  // v1.5: Canonical accessors for FloatingMonitor + dashboard consumers
+  getActiveTurn() { return this.activeTurn; },
+  getLatestFinalizedTurn() {
+    for (var i = this.finalized.length - 1; i >= 0; i--) return this.finalized[i];
+    return null;
+  },
+  latestFinalized() { return this.getLatestFinalizedTurn(); }
 };
 
 /* ------------------------------------------------------------------ */
@@ -1317,23 +1326,387 @@ function statusInfo(entry){
   return{title:"信息未完整捕获",tone:"unknown",basis:`触发条件：核心证据只有 ${e.coreCaptured}/2。当前缺少：${missing.join("、")||"未知字段"}。`,metrics};
 }
 
-const Badge = {
-  host:null,root:null,currentVerdict:null,currentModel:null,_dragged:false,
+/* ================================================================== */
+/* FLOATING MONITOR BAR (replaces old Badge)                           */
+/* ================================================================== */
+
+const FloatingMonitor = {
+  host:null,root:null,animFrame:null,_dragged:false,pulseOffset:0,_visible:true,
+  _lastFinalizedModel:null,_lastFinalizedVerdict:null,_activeCollecting:false,
+
   ensure(){
     if(this.host&&this.host.isConnected){this.applyTheme();return this.root;}
     this.host=document.createElement("div");this.host.id="chatgpt-model-downgrade-monitor-badge";this.host.style.cssText="all:initial;position:fixed;z-index:2147483647;touch-action:none;";this.root=this.host.attachShadow({mode:"open"});
     this.root.innerHTML=`<style>
-      .badge{--accent:#c9a7e8;--panel:#211e2b;--text:#f7f1fb;display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border-radius:999px;cursor:grab;user-select:none;font:650 12px/1.3 ui-rounded,"SF Pro Rounded","Segoe UI","Microsoft YaHei",sans-serif;white-space:nowrap;color:var(--text);background:color-mix(in srgb,var(--panel) 88%,transparent);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);backdrop-filter:blur(15px) saturate(135%);box-shadow:0 9px 28px rgba(10,8,16,.24);transition:.18s ease}.badge:hover{transform:translateY(-1px)}.badge:active{cursor:grabbing}.seal{display:grid;place-items:center;width:19px;height:19px;border-radius:7px;background:color-mix(in srgb,var(--accent) 20%,transparent);color:var(--accent);font-size:11px;font-weight:850}.badge[data-v="NORMAL"]{--accent:#78dfb0}.badge[data-v="MODEL_MISMATCH"],.badge[data-v="DOWNGRADE_SUSPECTED"]{--accent:#ff879f}.badge[data-v="EVIDENCE_CONFLICT"]{--accent:#c8a0ff}.badge[data-v="ROUTE_NOTICE"],.badge[data-v="UNKNOWN"]{--accent:#f4c96d}
-    </style><div class="badge" data-v="INIT" title="拖动移动 · 点击打开模型鉴定姬 · 双击恢复位置"><span class="seal">鉴</span><span class="text">模型鉴定姬</span></div>`;
-    try{document.documentElement.appendChild(this.host)}catch{return this.root}this.restorePosition();this.applyTheme();const el=this.root.querySelector('.badge');if(el){this.installDrag(el);el.addEventListener('click',e=>{e.stopPropagation();if(this._dragged){this._dragged=false;return}AudioFeedback.unlockOnGesture();Dashboard.toggle()});el.addEventListener('dblclick',e=>{e.preventDefault();e.stopPropagation();this.resetPosition()})}return this.root;
+      :host{--accent:#c9a7e8;--panel:#211e2b;--text:#f7f1fb;--surface:#2c2837;--surface2:#181620;--normal:#78dfb0;--danger:#ff879f;--conflict:#c8a0ff;--warn:#f4c96d;--muted:#b8aebe}
+      .bar{position:relative;display:flex;align-items:stretch;height:48px;min-width:230px;max-width:280px;padding:0;border-radius:12px;cursor:grab;user-select:none;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;background:color-mix(in srgb,var(--panel) 92%,transparent);border:1px solid var(--border, rgba(226,205,239,.20));backdrop-filter:blur(15px) saturate(135%);box-shadow:0 9px 28px rgba(10,8,16,.24);transition:height .28s cubic-bezier(.34,1.56,.64,1),max-width .28s cubic-bezier(.34,1.56,.64,1),border-color .35s ease;overflow:hidden}
+      .bar:hover{height:62px;max-width:380px}
+      .bar:active{cursor:grabbing}
+      .bar-left{display:flex;align-items:center;gap:8px;padding:0 10px;min-width:0;flex-shrink:1}
+      .bar-seal{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;flex-shrink:0;background:color-mix(in srgb,var(--accent) 20%,var(--surface2));color:var(--accent);font-size:12px;font-weight:850;transition:background-color .35s,color .35s}
+      .bar-model{min-width:0}
+      .bar-model-name{font-size:15px;font-weight:700;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:color .35s}
+      .bar-model-status{font-size:12px;font-weight:600;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .bar-model-status.collecting{opacity:.5;animation:bar-pulse-text 1.8s ease-in-out infinite}
+      @keyframes bar-pulse-text{0%,100%{opacity:.5}50%{opacity:1}}
+      .bar-model-status.hint{font-size:12px;color:var(--muted)}
+      .bar-right{display:flex;align-items:center;padding:0 10px 0 6px;flex-shrink:0;cursor:pointer}
+      .bar-right:hover .wave-svg{filter:brightness(1.15)}
+      .wave-svg{display:block;transition:filter .25s}
+      .bar-wave-label{font-size:10px;color:var(--muted);text-align:center;display:none;line-height:1}
+      .bar:hover .bar-wave-label{display:block}
+      @media(prefers-reduced-motion:reduce){.bar:hover{height:48px;max-width:280px;transition:none}.bar-model-status.collecting{animation:none}}
+    </style><div class="bar" title="拖动移动 · 点击打开模型鉴定姬 · 双击恢复位置"><div class="bar-left" data-region="main"><span class="bar-seal">鉴</span><div class="bar-model"><div class="bar-model-name">模型鉴定姬</div><div class="bar-model-status hint"></div></div></div><div class="bar-right" data-region="pow" title="查看 PoW 分析"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg><div class="bar-wave-label">PoW</div></div></div>`;
+    try{document.documentElement.appendChild(this.host)}catch{return this.root}
+    this.restorePosition();this.applyTheme();
+    var bar=this.root.querySelector('.bar');
+    var self=this;
+    if(bar){
+      this.installDrag(bar);
+      bar.querySelector('.bar-left').addEventListener('click',function(e){e.stopPropagation();if(self._dragged){self._dragged=false;return}AudioFeedback.unlockOnGesture();Dashboard.toggle()});
+      bar.querySelector('.bar-right').addEventListener('click',function(e){e.stopPropagation();if(self._dragged){self._dragged=false;return}Dashboard.show();Dashboard.activeTab='network';Dashboard.powExpanded=true;Dashboard.render()});
+      bar.addEventListener('dblclick',function(e){e.preventDefault();e.stopPropagation();self.resetPosition()});
+      bar.addEventListener('mouseenter',function(){self._expanded=true;self.drawWave()});
+      bar.addEventListener('mouseleave',function(){self._expanded=false;self.drawWave()});
+    }
+    this.maybeStartAnim();
+    return this.root;
   },
-  applyTheme(){const el=this.root&&this.root.querySelector('.badge');if(!el)return;const t=activeTheme();el.style.setProperty('--panel',t.panel);el.style.setProperty('--text',t.text);const v=el.dataset.v||this.currentVerdict;const a=(v==='NORMAL'?t.normal:(v==='MODEL_MISMATCH'||v==='DOWNGRADE_SUSPECTED')?t.danger:v==='EVIDENCE_CONFLICT'?t.conflict:(v==='ROUTE_NOTICE'||v==='UNKNOWN')?t.warn:t.accent);el.style.setProperty('--accent',a)},
-  restorePosition(){if(!this.host)return;const st=loadSettings(),p=st.badgePosition;if(p&&Number.isFinite(p.left)&&Number.isFinite(p.top)){this.host.style.left=`${Math.max(4,Math.min(p.left,window.innerWidth-60))}px`;this.host.style.top=`${Math.max(4,Math.min(p.top,window.innerHeight-30))}px`;this.host.style.right='auto'}else{this.host.style.left='auto';this.host.style.right='16px';this.host.style.top='12px'}},
-  resetPosition(){const st=loadSettings();st.badgePosition=null;saveSettings(st);this.restorePosition()},
-  savePosition(){if(!this.host)return;const r=this.host.getBoundingClientRect(),st=loadSettings();st.badgePosition={left:Math.round(r.left),top:Math.round(r.top)};saveSettings(st)},
-  installDrag(target){target.addEventListener('pointerdown',e=>{if(e.button!==0)return;const r=this.host.getBoundingClientRect(),sx=e.clientX,sy=e.clientY;let moved=false;try{target.setPointerCapture(e.pointerId)}catch{}const mv=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy;if(!moved&&Math.hypot(dx,dy)<4)return;moved=true;const ml=Math.max(4,window.innerWidth-r.width-4),mt=Math.max(4,window.innerHeight-r.height-4);this.host.style.right='auto';this.host.style.left=`${Math.max(4,Math.min(r.left+dx,ml))}px`;this.host.style.top=`${Math.max(4,Math.min(r.top+dy,mt))}px`};const up=ev=>{target.removeEventListener('pointermove',mv);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);try{target.releasePointerCapture(ev.pointerId)}catch{}if(moved){this._dragged=true;this.savePosition();setTimeout(()=>{this._dragged=false},120)}};target.addEventListener('pointermove',mv);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up)})},
-  setStatus(verdict,model){this.currentVerdict=verdict;this.currentModel=model;const root=this.ensure(),el=root&&root.querySelector('.badge');if(!el)return;el.dataset.v=verdict||'INIT';this.applyTheme();const text=root.querySelector('.text');if(!text)return;const fm=model?friendlyModelName(model):null;if(verdict===VERDICT.MODEL_MISMATCH||verdict===VERDICT.DOWNGRADE_SUSPECTED)text.textContent='请求与应答模型不一致';else if(verdict===VERDICT.EVIDENCE_CONFLICT)text.textContent='路由证据冲突';else if(verdict===VERDICT.ROUTE_NOTICE)text.textContent='模型字段发生变化';else if(fm)text.textContent=fm;else text.textContent='模型鉴定姬'}
+
+  applyTheme(){
+    var bar=this.root&&this.root.querySelector('.bar');
+    if(!bar)return;
+    var t=activeTheme();
+    bar.style.setProperty('--panel',t.panel);bar.style.setProperty('--text',t.text);
+    bar.style.setProperty('--surface',t.surface);bar.style.setProperty('--surface2',t.surface2);
+    bar.style.setProperty('--normal',t.normal);bar.style.setProperty('--danger',t.danger);
+    bar.style.setProperty('--conflict',t.conflict);bar.style.setProperty('--warn',t.warn);
+    bar.style.setProperty('--muted',t.muted);bar.style.setProperty('--border',t.border);
+    bar.style.setProperty('--accent',t.accent);
+  },
+
+  maybeStartAnim(){
+    var self=this;
+    var st=loadSettings();
+    if(!st.floatingAnimEnabled){this.stopAnim();return;}
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion:reduce)').matches){this.stopAnim();return;}
+    this.startAnim();
+  },
+
+  startAnim(){
+    if(this.animFrame)return;
+    var self=this;
+    this._pulseProgress=0;
+    this._pulsePathLen=1;
+    var lastT=0;
+    function frame(ts){
+      if(!lastT)lastT=ts;
+      var dt=Math.min(50,ts-lastT);lastT=ts;
+      var speed=self._pulsePathLen/(self._expanded?7:11)*dt/1000;
+      self._pulseProgress+=speed;
+      if(self._pulseProgress>=self._pulsePathLen)self._pulseProgress=0;
+      self._renderPulseOnly();
+      self.animFrame=requestAnimationFrame(frame);
+    }
+    this.animFrame=requestAnimationFrame(frame);
+  },
+
+  stopAnim(){
+    if(this.animFrame){cancelAnimationFrame(this.animFrame);this.animFrame=null}
+    this._pulseProgress=0;
+  },
+
+  _expanded:false,
+  _lastGeomTS:0,
+
+  getPoWPoints(count){
+    count=count||9;
+    var pow=loadPowHistory().slice(0,count);
+    var finalized=TurnAggregator.finalized;
+    var turnById={};
+    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.turnId)turnById[ft.turnId]=ft;}
+    var results=[];
+    for(var i=pow.length-1;i>=0;i--){
+      var p=pow[i];
+      var work=estimatePowWork(p.rawHex);if(!Number.isFinite(work))continue;
+      var associated=null;
+      if(p.turnId&&turnById[p.turnId])associated=turnById[p.turnId];
+      else if(p.turnId){for(var j=finalized.length-1;j>=0;j--){if(finalized[j].turnId===p.turnId){associated=finalized[j];break;}}}
+      if(!associated){
+        for(var k=finalized.length-1;k>=0;k--){
+          var fk=finalized[k];
+          if(fk.powDecimal===p.decimal&&p.decimal&&p.decimal!=='undefined'&&p.decimal!=='null'&&Number(p.decimal)>0){
+            if(!associated||(fk.timestamp&&Math.abs(fk.timestamp-Date.now())<30000))associated=fk;
+            break;
+          }
+        }
+      }
+      var v=associated?associated.primaryVerdict:null;
+      var hasConflict=associated&&associated.findings&&associated.findings.indexOf('ROUTE_EVIDENCE_CONFLICT')>=0;
+      results.push({work:work,rawDecimal:Number(p.decimal),raw:p.rawHex,t:p.observedAt?new Date(p.observedAt).getTime():0,verdict:v,hasConflict:hasConflict,turnId:p.turnId||null,assistantModel:associated?associated.assistantModel:null});
+      if(results.length>=count)break;
+    }
+    results.reverse();
+    return results;
+  },
+
+  getStateInfo(){
+    var activeTurn=TurnAggregator.activeTurn;
+    var latestFinalized=TurnAggregator.latestFinalized();
+    var isCollecting=activeTurn&&activeTurn.lifecycle!==LIFECYCLE.FINALIZED;
+    var stale=latestFinalized||null;
+    if(stale){this._lastFinalizedModel=stale.assistantModel;this._lastFinalizedVerdict=stale.primaryVerdict}
+    this._activeCollecting=isCollecting;
+    return{
+      isCollecting:isCollecting,
+      model:this._lastFinalizedModel||null,
+      verdict:this._lastFinalizedVerdict||null,
+      activeTurn:activeTurn||null,
+      finalized:stale||null
+    };
+  },
+
+  setStatus(verdict,model){
+    if(model)this._lastFinalizedModel=model;
+    if(verdict)this._lastFinalizedVerdict=verdict;
+    this.ensure();this.updateDisplay();
+  },
+
+  updateDisplay(){
+    var root=this.root;if(!root)return;
+    var nameEl=root.querySelector('.bar-model-name');
+    var statusEl=root.querySelector('.bar-model-status');
+    var sealEl=root.querySelector('.bar-seal');
+    if(!nameEl||!statusEl||!sealEl)return;
+    var info=this.getStateInfo();
+    var t=activeTheme();
+    var accent=t.accent;
+
+    if(info.model){
+      nameEl.textContent=friendlyModelName(info.model);
+    }else{
+      nameEl.textContent='模型鉴定姬';
+    }
+
+    statusEl.classList.remove('collecting','hint');
+    if(info.isCollecting){
+      statusEl.textContent='正在采集本轮证据…';statusEl.classList.add('collecting');
+      accent=info.finalized?this.colorForVerdict(info.finalized.primaryVerdict,t):t.accent;
+    }else if(info.verdict===VERDICT.NORMAL){
+      statusEl.textContent='模型一致';accent=t.normal;
+    }else if(info.verdict===VERDICT.MODEL_MISMATCH||info.verdict===VERDICT.DOWNGRADE_SUSPECTED){
+      statusEl.textContent='请求与应答模型不一致';accent=t.danger;
+    }else if(info.verdict===VERDICT.EVIDENCE_CONFLICT){
+      statusEl.textContent='路由证据冲突';accent=t.conflict;
+    }else if(info.verdict===VERDICT.ROUTE_NOTICE){
+      statusEl.textContent='模型字段发生变化';accent=t.warn;
+    }else if(info.verdict===VERDICT.UNKNOWN||!info.model){
+      statusEl.textContent='等待鉴定';statusEl.classList.add('hint');accent=t.muted;
+    }else{
+      statusEl.textContent='';statusEl.classList.add('hint');
+    }
+    sealEl.style.setProperty('background',`color-mix(in srgb,${accent} 20%,${t.surface2})`);
+    sealEl.style.setProperty('color',accent);
+    this.drawWave();
+  },
+
+  colorForVerdict(v,t){if(!t)t=activeTheme();return v===VERDICT.NORMAL?t.normal:v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED?t.danger:v===VERDICT.EVIDENCE_CONFLICT?t.conflict:v===VERDICT.ROUTE_NOTICE||v===VERDICT.UNKNOWN?t.warn:t.muted},
+
+drawWave(){
+    var root=this.root;if(!root)return;
+    var svg=root.querySelector('.wave-svg');if(!svg)return;
+    var _expanded=this._expanded;
+    var count=_expanded?18:9;
+    var points=this.getPoWPoints(count);
+    this._lastGeomTS=Date.now();
+    if(points.length<2){
+      svg.setAttribute('width',_expanded?'220':'90');
+      svg.setAttribute('viewBox','0 0 ' + (_expanded?'220':'90') + ' 44');
+      svg.innerHTML='<polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 ' + (_expanded?'220':'90') + ',22"/>';
+      return;
+    }
+    var n=points.length;
+    var w=_expanded?220:90;var h=44;
+    var padX=5,l=padX,r=w-padX,plotW=r-l,plotH=h-10;
+    var works=points.map(function(p){return p.work;});
+    var maxW=Math.max.apply(null,works),minW=Math.min.apply(null,works);
+    var span=Math.max(0.001,maxW-minW);
+    function xFn(i){return l+(n===1?plotW/2:i/(n-1))*plotW;}
+    function yFn(v){return 5+(1-(v-minW)/span)*plotH;}
+
+    var t=activeTheme();
+    function nodeColor(v2,hasC){return v2===VERDICT.NORMAL?t.normal:v2===VERDICT.MODEL_MISMATCH||v2===VERDICT.DOWNGRADE_SUSPECTED?t.danger:v2===VERDICT.EVIDENCE_CONFLICT||hasC?t.conflict:v2===VERDICT.ROUTE_NOTICE||v2===VERDICT.UNKNOWN?t.warn:t.muted;}
+
+    var segColors=[];
+    for(var i=0;i<n-1;i++){
+      var cA=nodeColor(points[i].verdict,points[i].hasConflict);
+      var cB=nodeColor(points[i+1].verdict,points[i+1].hasConflict);
+      var gradId='seg-grad-' + i;
+      segColors.push({id:gradId,from:cA,to:cB});
+    }
+
+    var segments='';
+    var defs='';
+    for(var i=0;i<n-1;i++){
+      var x1=xFn(i),y1=yFn(works[i]),x2=xFn(i+1),y2=yFn(works[i+1]);
+      var sc=segColors[i];
+      defs+='<linearGradient id="'+sc.id+'" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="'+sc.from+'" stop-opacity="0.85"/><stop offset="100%" stop-color="'+sc.to+'" stop-opacity="0.85"/></linearGradient>';
+      segments+='<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" stroke="url(#'+sc.id+')" stroke-width="2" stroke-linecap="round"/>';
+    }
+
+    var nodes='';
+    for(var i=0;i<n;i++){
+      var xx=xFn(i),yy=yFn(works[i]);
+      var v=points[i].verdict;
+      var hasC=points[i].hasConflict;
+      var fill=v===VERDICT.NORMAL?t.normal:v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED?t.danger:v===VERDICT.EVIDENCE_CONFLICT||hasC?t.conflict:v===VERDICT.ROUTE_NOTICE||v===VERDICT.UNKNOWN?t.warn:t.muted;
+      var r2=v&&(v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED)?4:2.8;
+      var stroke2=v&&(v===VERDICT.MODEL_MISMATCH||v===VERDICT.DOWNGRADE_SUSPECTED)&&hasC?' stroke="'+t.conflict+'" stroke-width="1.5"':'';
+      nodes+='<circle cx="'+xx+'" cy="'+yy+'" r="'+r2+'" fill="'+fill+'" opacity=".85"'+stroke2+'/>';
+    }
+
+    var pathD='M' + xFn(0) + ',' + yFn(works[0]);
+    for(var i=1;i<n;i++){pathD+=' L'+xFn(i)+','+yFn(works[i]);}
+
+    svg.setAttribute('width',String(w));
+    svg.setAttribute('viewBox','0 0 '+w+' '+h);
+    svg.innerHTML='<defs>'+defs+'</defs>' + segments + nodes + '<path id="wave-path" d="'+pathD+'" fill="none" stroke="transparent" stroke-width="4"/>';
+    this._lastPathD=pathD;
+    this._cachedSegCount=n;
+    this._cachedSegColors=[];
+    for(var si=0;si<segColors.length;si++)this._cachedSegColors.push(segColors[si].to);
+    if(segColors.length>0)this._cachedSegColors.unshift(segColors[0].from);
+    this._pulsePathLen=this._getPulsePathLen(svg);
+    // Precompute cumulative per-segment path lengths for accurate pulse→segment mapping
+    var pathEl2=svg.querySelector('#wave-path');
+    this._segCumulativeLen=[];
+    if(pathEl2&&n>=2){
+      var totalLen=this._pulsePathLen||pathEl2.getTotalLength();
+      var cumSum=0;
+      for(var si=0;si<n-1;si++){
+        var x1=xFn(si),y1=yFn(works[si]),x2=xFn(si+1),y2=yFn(works[si+1]);
+        var dx=x2-x1,dy=y2-y1;
+        var segLenApprox=Math.sqrt(dx*dx+dy*dy);
+        cumSum+=segLenApprox;
+        this._segCumulativeLen.push(cumSum/totalLen);
+      }
+    }
+    this._renderPulseOnly();
+  },
+
+  _getPulsePathLen(svg){
+    try{
+      var pathEl=svg.querySelector('#wave-path');
+      if(pathEl)return pathEl.getTotalLength();
+    }catch(e){}
+    return 300;
+  },
+
+  _renderPulseOnly(){
+    var root=this.root;if(!root)return;
+    var svg=root.querySelector('.wave-svg');if(!svg)return;
+    var pulseGroup=svg.querySelector('.pulse-group');
+    if(!pulseGroup){
+      pulseGroup=document.createElementNS('http://www.w3.org/2000/svg','g');
+      pulseGroup.setAttribute('class','pulse-group');
+      svg.appendChild(pulseGroup);
+    }
+    var pathEl=svg.querySelector('#wave-path');
+    if(!pathEl)return;
+    try{
+      if(!this._pulsePathLen||this._pulsePathLen<1)this._pulsePathLen=pathEl.getTotalLength();
+    }catch(e){return;}
+    var pathLen=this._pulsePathLen;
+    if(pathLen<1)return;
+    if(!this._pulseProgress)this._pulseProgress=0;
+    var prog=this._pulseProgress%pathLen;
+    var pt=pathEl.getPointAtLength(prog);
+    var trailLen=pathLen*0.06;
+    var r=this._expanded?12:9;
+
+    var n=this._cachedSegCount||0;
+    var segIndex=0;
+    if(n>=2){
+      var frac=prog/pathLen;
+      var cumLen=this._segCumulativeLen;
+      if(cumLen&&cumLen.length>0){
+        for(var i=0;i<cumLen.length;i++){if(frac<=cumLen[i]){segIndex=i;break;}segIndex=i+1;}
+        if(segIndex>=cumLen.length)segIndex=cumLen.length-1;
+      } else {
+        segIndex=Math.min(Math.floor(frac*(n-1)),n-2);
+      }
+    }
+    var clr=this._cachedSegColors&&this._cachedSegColors.length>segIndex?this._cachedSegColors[segIndex]:null;
+    if(!clr||clr==='var(--muted)')clr='var(--accent)';
+
+    var pluseHTML='';
+    for(var tr=0;tr<3;tr++){
+      var off=prog-(tr+1)*trailLen*0.7;
+      if(off<0)off+=pathLen;
+      var tp=pathEl.getPointAtLength(off);
+      var tr2=3.5-tr*0.8;
+      pluseHTML+='<circle cx="'+tp.x+'" cy="'+tp.y+'" r="'+tr2+'" fill="'+clr+'" opacity="'+(0.35-tr*0.1)+'"/>';
+    }
+    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="'+r+'" fill="'+clr+'" opacity="0.85"/>';
+    pluseHTML+='<circle cx="'+pt.x+'" cy="'+pt.y+'" r="'+(r+6)+'" fill="none" stroke="'+clr+'" stroke-width="2" opacity="0.45"/>';
+    pulseGroup.innerHTML=pluseHTML;
+  },
+
+  maybeStartAnim(){
+    var self=this;
+    var st=loadSettings();
+    if(!st.floatingAnimEnabled){this.stopAnim();return;}
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion:reduce)').matches){this.stopAnim();return;}
+    this.startAnim();
+  },
+
+  restorePosition(){
+    if(!this.host)return;
+    var st=loadSettings(),p=st.badgePosition;
+    if(p&&Number.isFinite(p.left)&&Number.isFinite(p.top)){
+      this.host.style.left=Math.max(4,Math.min(p.left,window.innerWidth-300))+'px';
+      this.host.style.top=Math.max(4,Math.min(p.top,window.innerHeight-70))+'px';this.host.style.right='auto';
+    }else{this.host.style.left='auto';this.host.style.right='16px';this.host.style.top='12px';}
+  },
+
+  resetPosition(){
+    var st=loadSettings();st.badgePosition=null;saveSettings(st);this.restorePosition();
+    this.updateDisplay();
+  },
+
+  savePosition(){
+    if(!this.host)return;
+    var r=this.host.getBoundingClientRect(),st=loadSettings();
+    st.badgePosition={left:Math.round(r.left),top:Math.round(r.top)};saveSettings(st);
+  },
+
+  installDrag(target){
+    var self=this;
+    target.addEventListener('pointerdown',function(e){
+      if(e.button!==0)return;
+      var r=self.host.getBoundingClientRect(),sx=e.clientX,sy=e.clientY;
+      var moved=false;
+      try{target.setPointerCapture(e.pointerId)}catch{}
+      function mv(ev){
+        var dx=ev.clientX-sx,dy=ev.clientY-sy;
+        if(!moved&&Math.hypot(dx,dy)<4)return;moved=true;
+        var ml=Math.max(4,window.innerWidth-r.width-4),mt=Math.max(4,window.innerHeight-r.height-4);
+        self.host.style.right='auto';
+        self.host.style.left=Math.max(4,Math.min(r.left+dx,ml))+'px';
+        self.host.style.top=Math.max(4,Math.min(r.top+dy,mt))+'px';
+      }
+      function up(ev){
+        target.removeEventListener('pointermove',mv);target.removeEventListener('pointerup',up);target.removeEventListener('pointercancel',up);
+        try{target.releasePointerCapture(ev.pointerId)}catch{}
+        if(moved){self._dragged=true;self.savePosition();setTimeout(function(){self._dragged=false},120)}
+      }
+      target.addEventListener('pointermove',mv);target.addEventListener('pointerup',up);target.addEventListener('pointercancel',up);
+    });
+  }
 };
+
+// Alias for backward compatibility
+const Badge = FloatingMonitor;
 
 const Dashboard = {
   host:null,root:null,open:false,resizeObserver:null,activeTab:"current",powExpanded:false,openPins:new Map(),
@@ -1352,7 +1725,7 @@ const Dashboard = {
       details{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}summary{cursor:pointer;color:var(--accent);font-size:11px}.tech{font:10px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--muted);white-space:pre-wrap;word-break:break-all;margin-top:7px}.empty{color:var(--muted);font-size:12px;padding:16px 3px}.muted{color:var(--muted);font-size:10px;line-height:1.55}
       .statgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.stat{padding:10px;border-radius:13px;background:var(--surface2);text-align:center;border:1px solid var(--border)}.stat b{display:block;font-size:18px}.stat small{color:var(--muted);font-size:9px}.barrow{margin:9px 0}.barhead{display:flex;justify-content:space-between;font-size:11px}.bar{height:7px;background:var(--surface2);border-radius:999px;overflow:hidden;margin-top:4px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:999px}.splitgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.minirow{font-size:11px;color:var(--muted);line-height:1.55}.minirow b{color:var(--text)}
       .field{display:grid;gap:5px;margin:10px 0}.field label{font-size:11px;color:var(--muted)}.field input[type=text],.field select,.select{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:10px;padding:8px 9px;outline:none}.setting-group{border:1px solid var(--border);background:var(--surface);border-radius:16px;padding:12px;margin-bottom:11px}.setting-group>h3{font-size:12px;margin:0 0 8px}.toggle{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 2px;border-bottom:1px solid var(--border);font-size:12px}.toggle:last-child{border-bottom:0}.subsetting{margin:5px 0 4px 17px;padding-left:10px;border-left:2px solid color-mix(in srgb,var(--accent) 35%,transparent)}.soundrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.range{width:100%;accent-color:var(--accent)}.theme-swatches{display:flex;gap:4px;margin-top:5px}.swatch{width:16px;height:8px;border-radius:999px;border:1px solid var(--border)}
-      .pow-wrap{overflow-x:auto;padding-bottom:6px}.pow-svg{display:block;min-height:270px}.pow-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.pow-stat{padding:8px;border-radius:11px;background:var(--surface2);text-align:center;border:1px solid var(--border)}.pow-stat b{display:block;font-size:12px}.pow-stat small{font-size:8px;color:var(--muted)}
+      .pow-wrap{overflow-x:auto;padding-bottom:6px}.pow-svg{display:block;min-height:270px}.pow-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.pow-stat{padding:12px 8px;border-radius:11px;background:var(--surface2);text-align:center;border:1px solid var(--border)}.pow-stat b{display:block;font-size:22px;font-weight:700;line-height:1.2}.pow-stat small{font-size:13px;font-weight:500;color:var(--muted)}
       .pin-window{position:fixed;width:min(390px,calc(100vw - 28px));max-height:min(560px,calc(100vh - 28px));overflow:auto;pointer-events:auto;background:var(--panel);color:var(--text);border:1px solid color-mix(in srgb,var(--accent) 38%,var(--border));border-radius:17px;box-shadow:0 20px 60px var(--shadow);z-index:20}.pin-head{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;background:color-mix(in srgb,var(--panel) 96%,transparent);border-bottom:1px solid var(--border);cursor:move;user-select:none}.pin-head b{font-size:12px}.pin-actions{display:flex;gap:5px}.pin-actions button{padding:3px 7px}.pin-body{padding:12px}.pin-lead{font-size:12px;font-weight:750;line-height:1.6;padding:9px 10px;border-radius:11px;background:color-mix(in srgb,var(--accent) 10%,var(--surface));margin-bottom:11px}.pin-section{margin:10px 0}.pin-section b{display:block;font-size:11px;color:var(--accent);margin-bottom:3px}.pin-section p{margin:0;font-size:11px;line-height:1.65;color:var(--muted)}
       .danger-text{color:var(--danger)!important}@media(max-width:720px){.panel{width:calc(100vw - 16px)!important;left:8px!important;resize:none}.statgrid,.splitgrid{grid-template-columns:1fr 1fr}.models{grid-template-columns:1fr 38px 1fr}.content{padding:12px}}
     </style><div class="overlay"><div class="panel"><div class="head" data-role="drag-handle"><div class="brand"><div class="brand-seal">鉴</div><div><b>模型鉴定姬</b><small>ChatGPT Model Downgrade Monitor</small></div></div><div class="head-actions"><a class="iconbtn" href="https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor" target="_blank" rel="noopener noreferrer" title="打开 GitHub 项目主页">GitHub ↗</a><button class="iconbtn" data-act="copy">复制诊断</button><button class="iconbtn" data-act="close">关闭</button></div></div><div class="tabs"><button class="tab" data-tab="current">当前</button><button class="tab" data-tab="archive">档案</button><button class="tab" data-tab="network">网络</button><button class="tab" data-tab="settings">设置</button></div><div class="content"><section class="pane" data-pane="current"></section><section class="pane" data-pane="archive"></section><section class="pane" data-pane="network"></section><section class="pane" data-pane="settings"></section></div></div></div>`;
@@ -1383,14 +1756,42 @@ const Dashboard = {
     const bars=[...models.entries()].sort((a,b)=>b[1]-a[1]).map(([m,n])=>`<div class="barrow"><div class="barhead"><span>${escapeHtml(friendlyModelName(m))}</span><span>${n} · ${total?Math.round(n/total*100):0}%</span></div><div class="bar"><i style="width:${total?n/total*100:0}%"></i></div></div>`).join('');const netRows=[...networks.entries()].map(([n,g])=>`<div class="minirow"><b>${escapeHtml(n)}</b> · ${g.n} 次 · 模型不一致/冲突 ${g.bad} 次 · ${g.n?Math.round(g.bad/g.n*100):0}%</div>`).join('');
     el.innerHTML=`<div class="section-title">总览</div><div class="statgrid"><div class="stat"><b>${total}</b><small>记录</small></div><div class="stat"><b>${counts.normal}</b><small>模型一致</small></div><div class="stat"><b>${counts.mismatch}</b><small>请求≠应答</small></div><div class="stat"><b>${counts.conflict}</b><small>证据冲突</small></div></div><div class="splitgrid"><div class="card"><div class="section-title" style="margin-top:0">异常监测</div><div class="minirow">请求与应答不一致：<b>${counts.mismatch}</b></div><div class="minirow">路由证据冲突：<b>${counts.conflict}</b></div><div class="minirow">服务器字段变化：<b>${counts.notice}</b></div><div class="minirow">信息未完整：<b>${counts.unknown}</b></div></div><div class="card"><div class="section-title" style="margin-top:0">节点表现</div>${netRows||'<div class="empty">暂无数据</div>'}</div></div><div class="card"><div class="section-title" style="margin-top:0">模型使用比例</div>${bars||'<div class="empty">暂无数据</div>'}</div><div class="section-title">模型档案 · 一问一答一张卡</div>${hist.length?hist.map(x=>this.routeCard(x,true)).join(''):'<div class="empty">暂无档案。</div>'}`;
   },
-  powChart(samples){
-    const pts=samples.map(x=>({raw:x.rawHex||'',rawDecimal:Number(x.decimal),work:estimatePowWork(x.rawHex),t:x.observedAt?new Date(x.observedAt):null,label:x.networkLabel||''})).filter(x=>Number.isFinite(x.work)).reverse();
+powChart(samples){
+    var finalized=TurnAggregator.finalized;
+    var powToTurn={};
+    for(var fi=finalized.length-1;fi>=0;fi--){var ft=finalized[fi];if(ft.powDecimal)powToTurn[ft.powDecimal]=ft;}
+    var pts=[];for(var i=0;i<samples.length;i++){
+      var x=samples[i];var work=estimatePowWork(x.rawHex);if(!Number.isFinite(work))continue;
+      var assoc=powToTurn[x.decimal]||null;
+      pts.push({raw:x.rawHex||'',rawDecimal:Number(x.decimal),work:work,t:x.observedAt?new Date(x.observedAt):null,label:x.networkLabel||'',verdict:assoc?assoc.primaryVerdict:null,turn:assoc});
+    }pts.reverse();
     if(pts.length<2)return '<div class="empty">PoW 样本不足，暂时无法画估算工作量趋势。</div>';
-    const vals=pts.map(x=>x.work),min=Math.min(...vals),max=Math.max(...vals),span=Math.max(.001,max-min),n=pts.length,w=Math.max(700,n*76),h=290,l=66,r=26,t=32,b=50,plotW=w-l-r,plotH=h-t-b;const x=i=>l+(n===1?0:i/(n-1))*plotW,y=v=>t+(max-v)/span*plotH;const ticks=5;let grid='';
-    const fmtWork=v=>v>=1000?`${(v/1000).toFixed(v>=10000?0:1)}k×`:v>=100?`${v.toFixed(0)}×`:v>=10?`${v.toFixed(1)}×`:`${v.toFixed(2)}×`;
-    for(let i=0;i<ticks;i++){const val=max-(span*i/(ticks-1)),yy=y(val);grid+=`<line x1="${l}" y1="${yy}" x2="${w-r}" y2="${yy}" stroke="var(--border)" stroke-width="1"/><text x="${l-9}" y="${yy+4}" text-anchor="end" fill="var(--muted)" font-size="10">${fmtWork(val)}</text>`}
-    const line=pts.map((p,i)=>`${x(i)},${y(p.work)}`).join(' ');const circles=pts.map((p,i)=>{const xx=x(i),yy=y(p.work),time=p.t&&!Number.isNaN(p.t)?p.t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):`#${i+1}`,showLabel=n<=20||i%Math.ceil(n/20)===0;return `<circle cx="${xx}" cy="${yy}" r="4" fill="var(--accent)" stroke="var(--panel)" stroke-width="2"><title>${escapeHtml(time)} · 估算工作量 ${fmtWork(p.work)} · raw ${Number.isFinite(p.rawDecimal)?p.rawDecimal.toLocaleString():'—'} · hex ${escapeHtml(p.raw)}${p.label?' · '+escapeHtml(p.label):''}</title></circle>${showLabel?`<text x="${xx}" y="${Math.max(14,yy-10)}" text-anchor="middle" fill="var(--text)" font-size="9">${fmtWork(p.work)}</text><text x="${xx}" y="${h-18}" text-anchor="middle" fill="var(--muted)" font-size="9">${escapeHtml(time)}</text>`:''}`}).join('');
-    return `<div class="pow-wrap"><svg class="pow-svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="PoW estimated work trend">${grid}<line x1="${l}" y1="${h-b}" x2="${w-r}" y2="${h-b}" stroke="var(--muted)"/><line x1="${l}" y1="${t}" x2="${l}" y2="${h-b}" stroke="var(--muted)"/><text x="12" y="17" fill="var(--muted)" font-size="10">估算工作量（期望尝试次数）</text><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${line}"/>${circles}</svg></div><div class="muted">Y 轴越高 = 按公开逆向算法估算，需要的尝试次数越多。点位悬停可看原始 difficulty 十进制/十六进制值；这是逆向估算，不是 OpenAI 官方“风控分”。</div>`;
+    var vals=pts.map(function(p){return p.work;}),min=Math.min.apply(null,vals),max=Math.max.apply(null,vals),span=Math.max(.001,max-min),n=pts.length,w=Math.max(700,n*76),h=300,l=70,r=26,tt=36,b=54,plotW=w-l-r,plotH=h-tt-b;
+    function xFn(i){return l+(n===1?0:i/(n-1))*plotW;}function yFn(v){return tt+(max-v)/span*plotH;}
+    function fmtWork(v){return v>=1000?(v/1000).toFixed(v>=10000?0:1)+'k×':v>=100?v.toFixed(0)+'×':v>=10?v.toFixed(1)+'×':v.toFixed(2)+'×';}
+    var ticks=5;var grid='';
+    for(var ti=0;ti<ticks;ti++){var val=max-(span*ti/(ticks-1)),yy=yFn(val);grid+='<line x1="'+l+'" y1="'+yy+'" x2="'+(w-r)+'" y2="'+yy+'" stroke="var(--border)" stroke-width="1"/><text x="'+(l-9)+'" y="'+(yy+4)+'" text-anchor="end" fill="var(--muted)" font-size="12">'+fmtWork(val)+'</text>';}
+    var line=pts.map(function(p,i){return xFn(i)+','+yFn(p.work);}).join(' ');
+    var circles='';
+    for(var ci=0;ci<pts.length;ci++){var p=pts[ci],xx=xFn(ci),yy2=yFn(p.work),time=p.t&&!Number.isNaN(p.t)?p.t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'#'+(ci+1);
+      var fill='var(--muted)',stroke='var(--panel)';
+      if(p.verdict===VERDICT.NORMAL){fill='var(--normal)';}
+      else if(p.verdict===VERDICT.MODEL_MISMATCH||p.verdict===VERDICT.DOWNGRADE_SUSPECTED){fill='var(--danger)';if(p.turn&&p.turn.findings&&p.turn.findings.indexOf('ROUTE_EVIDENCE_CONFLICT')>=0)stroke='var(--conflict)';}
+      else if(p.verdict===VERDICT.EVIDENCE_CONFLICT){fill='var(--conflict)';}
+      else if(p.verdict===VERDICT.ROUTE_NOTICE||p.verdict===VERDICT.UNKNOWN){fill='var(--warn)';}
+      var tooltip=escapeHtml(time+' · 估算工作量 '+fmtWork(p.work)+' · raw '+p.rawDecimal.toLocaleString());if(p.label)tooltip+=' · '+escapeHtml(p.label);
+      var showLabel=n<=20||ci%Math.ceil(n/20)===0;
+      circles+='<circle cx="'+xx+'" cy="'+yy2+'" r="5" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"><title>'+tooltip+'</title></circle>';
+      if(showLabel){circles+='<text x="'+xx+'" y="'+Math.max(14,yy2-10)+'" text-anchor="middle" fill="var(--text)" font-size="12">'+fmtWork(p.work)+'</text><text x="'+xx+'" y="'+(h-18)+'" text-anchor="middle" fill="var(--muted)" font-size="12">'+escapeHtml(time)+'</text>';}
+    }
+    var legend='<div class="pow-legend" style="display:flex;gap:12px;flex-wrap:wrap;margin:6px 0;font-size:12px">';
+    legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--normal)"></span> 绿色 · 模型一致</span>';
+    legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--danger)"></span> 红色 · 请求与应答不一致</span>';
+    legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--conflict)"></span> 紫色 · 路由证据冲突</span>';
+    legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--warn)"></span> 黄色 · 证据未完整</span>';
+    legend+='<span class="pow-legend-item" style="display:flex;align-items:center;gap:4px"><span class="pow-legend-dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted)"></span> 灰色 · 未关联模型记录</span>';
+    legend+='</div>';
+    return '<div class="pow-wrap">'+legend+'<svg class="pow-svg" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" aria-label="PoW estimated work trend">'+grid+'<line x1="'+l+'" y1="'+(h-b)+'" x2="'+(w-r)+'" y2="'+(h-b)+'" stroke="var(--muted)"/><line x1="'+l+'" y1="'+tt+'" x2="'+l+'" y2="'+(h-b)+'" stroke="var(--muted)"/><text x="12" y="17" fill="var(--muted)" font-size="13">估算工作量（期望尝试次数）</text><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="'+line+'"/>'+circles+'</svg></div><div class="muted">Y 轴越高 = 按公开逆向算法估算，需要的尝试次数越多。点位悬停可看原始 difficulty 十进制/十六进制值；这是逆向估算，不是 OpenAI 官方"风控分"。</div>';
   },
   renderNetwork(el){
     if(!el)return;const st=loadSettings(),hist=State.historyForUi(),groups=new Map();for(const x of hist){const k=x.networkLabel||'未命名网络',g=groups.get(k)||{n:0,mismatch:0,conflict:0,pow:[]};g.n++;if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED)g.mismatch++;if(x.verdict===VERDICT.EVIDENCE_CONFLICT)g.conflict++;const p=Number(x.powDecimal);if(Number.isFinite(p))g.pow.push(p);groups.set(k,g)}const rows=[...groups.entries()].map(([k,g])=>`<div class="card"><b>${escapeHtml(k)}</b><div class="minirow">应答 ${g.n} 次 · 请求≠应答 ${g.mismatch} · 路由冲突 ${g.conflict} · 平均 PoW ${g.pow.length?Math.round(g.pow.reduce((a,b)=>a+b,0)/g.pow.length).toLocaleString():'—'}</div></div>`).join('');const snap=currentNetworkSnapshot(),pow=loadPowHistory().slice(0,50),nums=pow.map(x=>Number(x.decimal)).filter(Number.isFinite),works=pow.map(x=>estimatePowWork(x.rawHex)).filter(Number.isFinite),sortedWork=[...works].sort((a,b)=>a-b),medianWork=sortedWork.length?sortedWork[Math.floor(sortedWork.length/2)]:null,avgWork=works.length?works.reduce((a,b)=>a+b,0)/works.length:null,latest=pow[0]||null;const c=snap.connection||{},fmtWork=v=>!Number.isFinite(v)?'—':v>=1000?`${(v/1000).toFixed(v>=10000?0:1)}k×`:v>=100?`${v.toFixed(0)}×`:v>=10?`${v.toFixed(1)}×`:`${v.toFixed(2)}×`;
@@ -1398,8 +1799,8 @@ const Dashboard = {
   },
   renderSettings(el){
     if(!el)return;const st=loadSettings();const toggle=(key,label,desc)=>`<label class="toggle"><span>${escapeHtml(label)}<br><small class="muted">${escapeHtml(desc)}</small></span><input type="checkbox" data-setting="${key}" ${st[key]?'checked':''}></label>`;const opts=Object.entries(THEMES).map(([id,t])=>`<option value="${id}" ${st.theme===id?'selected':''}>${escapeHtml(t.name)}</option>`).join('')+`<option value="system" ${st.theme==='system'?'selected':''}>系统自动</option>`;const sounds=[['glass','玻璃铃'],['beep','电子滴'],['water','水滴'],['dual','双音提示'],['alert','警戒音'],['none','无声音']].map(([id,n])=>`<option value="${id}" ${st.soundType===id?'selected':''}>${n}</option>`).join('');
-    el.innerHTML=`<div class="setting-group"><h3>外观</h3><div class="field"><label>主题</label><select data-setting-select="theme">${opts}</select><div class="muted">主题会一起改变背景、卡片、用户/AI 气泡、状态色、图表和解释便签，不只是换一个主色。</div></div></div><div class="setting-group"><h3>提醒方式</h3>${toggle('alertEnabled','模型不一致或路由冲突时提醒我','总开关：关闭后仍记录，但不主动打扰你')}${toggle('toastEnabled','页面弹窗提醒','出现模型不一致、路由冲突或服务器字段变化时，在页面顶部显示人话提示')}<div class="subsetting">${toggle('soundEnabled','播放提示音','只在模型不一致或路由冲突时发声')}<div class="soundrow"><div class="field"><label>提示音</label><select data-setting-select="soundType">${sounds}</select></div><button class="btn" data-act="sound-preview">试听</button></div><div class="field"><label>音量 <span data-role="volume-label">${Math.round(Number(st.soundVolume||0)*100)}%</span></label><input class="range" type="range" min="0" max="1" step="0.05" value="${Number(st.soundVolume??0.55)}" data-setting-range="soundVolume"></div></div></div><div class="setting-group"><h3>显示方式</h3>${toggle('ghostWarningEnabled','在异常回复下显示模型警告','如果这一轮请求与应答模型不一致，或服务器证据互相冲突，就在对应 ChatGPT 回复下面标出来')}</div><div class="setting-group"><h3>隐私与记录</h3>${toggle('persistChatSummaries','记住每条记录对应的对话','只保存少量 Prompt 与回复摘要，方便以后认出是哪一次对话；不会保存完整聊天')}</div><div class="setting-group"><h3>高级</h3>${toggle('titleFlashEnabled','后台标签页闪烁','页面在后台时，如果出现模型不一致或路由冲突，用浏览器标签标题提醒你')}${toggle('ghostMarkAll','在每条回复下显示鉴定结果','默认关闭；开启后连正常回复也会显示模型标签')}${toggle('wsFallbackEnabled','WebSocket 备用捕获','只有 ChatGPT 改用 WebSocket 传输时才可能用到，平时不需要管')}${toggle('powEnabled','记录 PoW','保存服务器返回的工作量证明难度，用于网络/风控趋势对比；它不是 IP 质量分')}</div><div class="setting-group"><button class="btn" data-act="reset-pos">重置悬浮窗位置</button> <button class="btn danger-text" data-act="clear">清空历史和 PoW</button><div class="muted" style="margin-top:9px">模型鉴定姬只观察网络证据，不修改请求、Header、Cookie、模型选择或 ChatGPT 的回答内容。</div><div style="margin-top:10px"><a class="btn" href="https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-flex;align-items:center">GitHub 项目主页 ↗</a></div></div>`;
-    el.querySelectorAll('[data-setting]').forEach(i=>i.addEventListener('change',()=>{const s=loadSettings();s[i.dataset.setting]=i.checked;saveSettings(s)}));el.querySelectorAll('[data-setting-select]').forEach(i=>i.addEventListener('change',()=>{const s=loadSettings();s[i.dataset.settingSelect]=i.value;saveSettings(s);if(i.dataset.settingSelect==='theme'){this.applyTheme();Badge.applyTheme();this.render()}}));const range=el.querySelector('[data-setting-range="soundVolume"]');if(range)range.addEventListener('input',()=>{const s=loadSettings();s.soundVolume=Number(range.value);saveSettings(s);const lab=el.querySelector('[data-role="volume-label"]');if(lab)lab.textContent=`${Math.round(Number(range.value)*100)}%`});const preview=el.querySelector('[data-act="sound-preview"]');if(preview)preview.addEventListener('click',()=>{const sel=el.querySelector('[data-setting-select="soundType"]');AudioFeedback.preview(sel&&sel.value)});const reset=el.querySelector('[data-act="reset-pos"]');if(reset)reset.addEventListener('click',()=>{const s=loadSettings();s.dashboardPosition=s.dashboardSize=s.badgePosition=null;s.conceptPinPositions={};saveSettings(s);Badge.restorePosition();this.restoreGeometry(true)});const clear=el.querySelector('[data-act="clear"]');if(clear)clear.addEventListener('click',()=>{clearAllStorage();State.resetSession();Badge.setStatus(null,null);this.render()})
+    el.innerHTML=`<div class="setting-group"><h3>外观</h3><div class="field"><label>主题</label><select data-setting-select="theme">${opts}</select><div class="muted">主题会一起改变背景、卡片、用户/AI 气泡、状态色、图表和解释便签，不只是换一个主色。</div></div></div><div class="setting-group"><h3>提醒方式</h3>${toggle('alertEnabled','模型不一致或路由冲突时提醒我','总开关：关闭后仍记录，但不主动打扰你')}${toggle('toastEnabled','页面弹窗提醒','出现模型不一致、路由冲突或服务器字段变化时，在页面顶部显示人话提示')}<div class="subsetting">${toggle('soundEnabled','播放提示音','只在模型不一致或路由冲突时发声')}<div class="soundrow"><div class="field"><label>提示音</label><select data-setting-select="soundType">${sounds}</select></div><button class="btn" data-act="sound-preview">试听</button></div><div class="field"><label>音量 <span data-role="volume-label">${Math.round(Number(st.soundVolume||0)*100)}%</span></label><input class="range" type="range" min="0" max="1" step="0.05" value="${Number(st.soundVolume??0.55)}" data-setting-range="soundVolume"></div></div></div><div class="setting-group"><h3>显示方式</h3>${toggle('ghostWarningEnabled','在异常回复下显示模型警告','如果这一轮请求与应答模型不一致，或服务器证据互相冲突，就在对应 ChatGPT 回复下面标出来')}</div><div class="setting-group"><h3>隐私与记录</h3>${toggle('persistChatSummaries','记住每条记录对应的对话','只保存少量 Prompt 与回复摘要，方便以后认出是哪一次对话；不会保存完整聊天')}</div><div class="setting-group"><h3>高级</h3>${toggle('titleFlashEnabled','后台标签页闪烁','页面在后台时，如果出现模型不一致或路由冲突，用浏览器标签标题提醒你')}${toggle('ghostMarkAll','在每条回复下显示鉴定结果','默认关闭；开启后连正常回复也会显示模型标签')}${toggle('floatingAnimEnabled','浮动监控条动画','关闭后仍显示模型名、状态颜色与真实 PoW 波形，但停止脉冲沿线流动动画')}${toggle('wsFallbackEnabled','WebSocket 备用捕获','只有 ChatGPT 改用 WebSocket 传输时才可能用到，平时不需要管')}${toggle('powEnabled','记录 PoW','保存服务器返回的工作量证明难度，用于网络/风控趋势对比；它不是 IP 质量分')}</div><div class="setting-group"><button class="btn" data-act="reset-pos">重置悬浮窗位置</button> <button class="btn danger-text" data-act="clear">清空历史和 PoW</button><div class="muted" style="margin-top:9px">模型鉴定姬只观察网络证据，不修改请求、Header、Cookie、模型选择或 ChatGPT 的回答内容。</div><div style="margin-top:10px"><a class="btn" href="https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-flex;align-items:center">GitHub 项目主页 ↗</a></div></div>`;
+    el.querySelectorAll('[data-setting]').forEach(i=>i.addEventListener('change',()=>{const s=loadSettings();s[i.dataset.setting]=i.checked;saveSettings(s);if(i.dataset.setting==='floatingAnimEnabled'){if(i.checked)FloatingMonitor.maybeStartAnim();else FloatingMonitor.stopAnim()}}));el.querySelectorAll('[data-setting-select]').forEach(i=>i.addEventListener('change',()=>{const s=loadSettings();s[i.dataset.settingSelect]=i.value;saveSettings(s);if(i.dataset.settingSelect==='theme'){this.applyTheme();FloatingMonitor.applyTheme();FloatingMonitor.updateDisplay();this.render()}}));const range=el.querySelector('[data-setting-range="soundVolume"]');if(range)range.addEventListener('input',()=>{const s=loadSettings();s.soundVolume=Number(range.value);saveSettings(s);const lab=el.querySelector('[data-role="volume-label"]');if(lab)lab.textContent=`${Math.round(Number(range.value)*100)}%`});const preview=el.querySelector('[data-act="sound-preview"]');if(preview)preview.addEventListener('click',()=>{const sel=el.querySelector('[data-setting-select="soundType"]');AudioFeedback.preview(sel&&sel.value)});const reset=el.querySelector('[data-act="reset-pos"]');if(reset)reset.addEventListener('click',()=>{const s=loadSettings();s.dashboardPosition=s.dashboardSize=s.badgePosition=null;s.conceptPinPositions={};saveSettings(s);Badge.restorePosition();this.restoreGeometry(true)});const clear=el.querySelector('[data-act="clear"]');if(clear)clear.addEventListener('click',()=>{clearAllStorage();State.resetSession();Badge.setStatus(null,null);this.render()})
   },
   copyDiagnostics(){try{const data={exportedAt:nowIso(),version:CONFIG.PROTOCOL_VERSION,pow:loadPowHistory(),history:loadHistory(),settings:{...loadSettings(),networkLabel:loadSettings().networkLabel}};const ta=document.createElement('textarea');ta.value=JSON.stringify(data,null,2);document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove()}catch{}}
 };
@@ -1544,7 +1945,7 @@ const State = {
   _last:null,_dedupe:new Map(),_historyWritten:new Set(),_powSeen:0,_hooks:{fetch:false,sse:false,pow:"waiting",ws:false},_sessionEntries:[],_latestPow:null,
   setHooks(h){Object.assign(this._hooks,h)},
   hookHealth(){const h=this._hooks,overall=h.fetch&&h.sse?'READY':(h.fetch||h.sse)?'PARTIAL':'FAILED';return{overall,fetch:h.fetch,sse:h.sse,pow:h.pow,ws:h.ws}},
-  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection};this._latestPow=enriched;addPowSample(enriched);if(TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt)TurnAggregator.associatePow(TurnAggregator.activeTurn,sample);postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
+  recordPow(sample){if(!loadSettings().powEnabled)return;this._powSeen+=1;this._hooks.pow='observed';const snap=currentNetworkSnapshot(),enriched={...sample,networkLabel:snap.label,networkConnection:snap.connection,turnId:TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt?TurnAggregator.activeTurn.turnId:null};this._latestPow=enriched;addPowSample(enriched);if(TurnAggregator.activeTurn&&!TurnAggregator.activeTurn.finalizedAt)TurnAggregator.associatePow(TurnAggregator.activeTurn,sample);postBus(MSG_TYPE.POW,{sample:enriched,total:this._powSeen})},
   resetSession(){this._last=null;this._dedupe.clear();this._historyWritten.clear();this._sessionEntries=[];TurnAggregator.reset()},
   historyForUi(){const persisted=loadHistory(),all=[...this._sessionEntries,...persisted],seen=new Set(),out=[];for(const x of all){const k=x.captureId||x.turnId||`${x.timestamp}:${x.messageId||x.conversationId||''}`;if(seen.has(k))continue;seen.add(k);out.push(x);if(out.length>=CONFIG.MAX_HISTORY)break;}return out},
   // v1.5: emitTurn called by TurnAggregator after finalization.
