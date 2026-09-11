@@ -4,9 +4,22 @@
 
 **An evidence-oriented Tampermonkey userscript for observing ChatGPT model routing, silent model switches, and request/response model mismatches.**
 
-[简体中文](README.md) · [Install userscript](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
+[![Latest Release](https://img.shields.io/github/v/release/DAIORANGE/chatgpt-model-downgrade-monitor?display_name=tag&sort=semver)](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/latest)
+[![Userscript](https://img.shields.io/badge/userscript-Tampermonkey-00ad9f)](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
+[![Firefox](https://img.shields.io/badge/Firefox-primary%20target-ff7139)](https://www.mozilla.org/firefox/)
+[![JavaScript](https://img.shields.io/badge/JavaScript-ES2020+-f7df1e)](ChatGPT-Model-Downgrade-Monitor.user.js)
+
+[简体中文](README.md) · [Install userscript](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js) · [Releases](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases) · [Issues](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/issues)
 
 </div>
+
+## Latest release
+
+Current public version: **v1.4.1**
+
+- [View release](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/tag/v1.4.1)
+- [Install the userscript directly](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
+- [SHA-256](ChatGPT-Model-Downgrade-Monitor.user.js.sha256)
 
 ## Why this project exists
 
@@ -19,8 +32,6 @@ Many ChatGPT model-monitoring tools started as Chrome / Chromium extensions. Tha
 - users who want model-routing visibility without depending on a Chrome MV3 extension.
 
 It does not guess the model from response speed, writing style, subjective answer quality, or what the model claims to be. It compares model-related fields that are actually observable in ChatGPT's web requests and responses.
-
-> This is an unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Tampermonkey.
 
 ## What it observes
 
@@ -144,6 +155,19 @@ A single high or low PoW observation does not prove that an account, IP address,
 - server-route, resolved-model and assistant-model fields are independent evidence and must not be substituted for one another blindly;
 - browser RTT/downlink values are network estimates, not isolated proxy-node-to-OpenAI measurements;
 - the tool can only report fields exposed to the web client and cannot prove every internal OpenAI routing decision.
+
+## Disclaimer
+
+**This is an unofficial, independent community tool. It is not affiliated with, authorized by, sponsored by, or endorsed by OpenAI, ChatGPT, Tampermonkey, or their operators.**
+
+- `ChatGPT`, `OpenAI`, related product names, logos and trademarks belong to their respective owners. They are referenced here only to identify compatibility and technical scope.
+- The monitor observes only request/response fields exposed to the browser. It cannot verify or prove undisclosed OpenAI model-routing logic, billing behavior, account state, anti-abuse decisions, or infrastructure status.
+- ChatGPT's web client and internal interfaces change frequently. This project may therefore experience missing fields, breakage, false positives, false negatives, or compatibility issues without notice. No guarantee is made that detection will remain complete or always accurate.
+- PoW, RTT, downlink, server-route and similar values are auxiliary observations. None of them alone should be treated as proof of IP reputation, account health, model downgrade, or official service status.
+- The software is provided as-is. Users are responsible for evaluating the output and assume the risks associated with installation, operation, debugging, and reliance on changing web internals.
+- Users are responsible for complying with applicable service terms, browser/userscript platform rules, and local laws.
+
+For authoritative questions about account status, billing, subscription entitlements, or official service availability, rely on OpenAI's official UI, documentation, and support channels.
 
 ## Search keywords
 
