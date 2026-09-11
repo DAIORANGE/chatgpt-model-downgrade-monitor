@@ -20,10 +20,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set repository topics
+      - name: Try to set repository topics
         shell: bash
+        continue-on-error: true
         run: |
-          set -euo pipefail
           gh api --method PUT \
             -H 'Accept: application/vnd.github+json' \
             /repos/${{ github.repository }}/topics \
@@ -55,6 +55,8 @@ jobs:
           fi
 
           if ! git rev-parse v1.4.1 >/dev/null 2>&1; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git tag -a v1.4.1 -m 'ChatGPT Model Downgrade Monitor v1.4.1'
             git push origin v1.4.1
           fi
