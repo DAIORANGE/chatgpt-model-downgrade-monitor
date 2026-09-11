@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0
+
+- Added turn-level Fetch + WebSocket evidence aggregation to prevent fragmented duplicate records.
+- Added evidence completeness tracking and clearer explanations for requested, assistant, resolved, and server-route model fields.
+- Rebuilt PoW visualization around one canonical series shared by the full chart and floating mini waveform.
+- Added semantic PoW point colors, path-following pulse animation, richer hover details, and reload-safe PoW-to-turn persistence.
+- Redesigned the floating monitor bar and model comparison panel with stronger semantic status colors.
+- Improved archive readability, typography, model-flow symmetry, assistant avatar placement, and dialogue visual hierarchy.
+- Clarified RTT/downlink wording and kept PoW explicitly framed as auxiliary observational data rather than an IP quality score.
+
 ## 1.4.1
 
 - Added public-project userscript metadata (`@homepageURL`, `@supportURL`, `@downloadURL`, `@updateURL`).

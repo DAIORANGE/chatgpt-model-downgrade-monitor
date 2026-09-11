@@ -15,9 +15,9 @@
 
 ## 最新版本
 
-当前公开版本：**v1.4.1**
+当前公开版本：**v1.5.0**
 
-- [查看 Release](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/tag/v1.4.1)
+- [查看 Release](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/tag/v1.5.0)
 - [直接安装 userscript](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
 - [查看 SHA-256](ChatGPT-Model-Downgrade-Monitor.user.js.sha256)
 

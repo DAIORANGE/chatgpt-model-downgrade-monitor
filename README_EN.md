@@ -15,9 +15,9 @@
 
 ## Latest release
 
-Current public version: **v1.4.1**
+Current public version: **v1.5.0**
 
-- [View release](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/tag/v1.4.1)
+- [View release](https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/releases/tag/v1.5.0)
 - [Install the userscript directly](https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js)
 - [SHA-256](ChatGPT-Model-Downgrade-Monitor.user.js.sha256)
 
