@@ -3,7 +3,7 @@
 // @name:zh-CN   ChatGPT Model Downgrade Monitor | 模型鉴定姬
 // @name:en      ChatGPT Model Downgrade Monitor
 // @namespace    chatgpt-model-downgrade-monitor
-// @version      1.4.1
+// @version      1.5.0-rc.1
 // @description  Detect ChatGPT silent model downgrades, hidden model routing, mini fallbacks, and requested-vs-response model mismatches. Designed for Tampermonkey users on Firefox and Chromium-family browsers.
 // @description:zh-CN  检测 ChatGPT 请求模型、服务器路由与最终应答模型是否一致，帮助发现静默模型切换、mini fallback 与路由冲突；重点面向 Firefox 及其他可安装 Tampermonkey 的桌面浏览器。
 // @description:en  Monitor requested, routed, resolved and assistant-reported ChatGPT models to surface silent model switches and routing conflicts, with Firefox/Tampermonkey compatibility as a primary goal.
