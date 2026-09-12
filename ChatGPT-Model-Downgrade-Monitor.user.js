@@ -3,7 +3,7 @@
 // @name:zh-CN   ChatGPT Model Downgrade Monitor | 模型鉴定姬
 // @name:en      ChatGPT Model Downgrade Monitor
 // @namespace    chatgpt-model-downgrade-monitor
-// @version      1.5.0
+// @version      1.5.1-rc.1
 // @description  Detect ChatGPT silent model downgrades, hidden model routing, mini fallbacks, and requested-vs-response model mismatches. Designed for Tampermonkey users on Firefox and Chromium-family browsers.
 // @description:zh-CN  检测 ChatGPT 请求模型、服务器路由与最终应答模型是否一致，帮助发现静默模型切换、mini fallback 与路由冲突；重点面向 Firefox 及其他可安装 Tampermonkey 的桌面浏览器。
 // @description:en  Monitor requested, routed, resolved and assistant-reported ChatGPT models to surface silent model switches and routing conflicts, with Firefox/Tampermonkey compatibility as a primary goal.
@@ -11,8 +11,8 @@
 // @license      PolyForm-Noncommercial-1.0.0
 // @homepageURL  https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor
 // @supportURL   https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor/issues
-// @downloadURL  https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js
-// @updateURL    https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/main/ChatGPT-Model-Downgrade-Monitor.user.js
+// @downloadURL  https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/v1.5.1-rc/ChatGPT-Model-Downgrade-Monitor.user.js
+// @updateURL    https://raw.githubusercontent.com/DAIORANGE/chatgpt-model-downgrade-monitor/v1.5.1-rc/ChatGPT-Model-Downgrade-Monitor.user.js
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        none
@@ -63,6 +63,7 @@ const CONFIG = {
   POW_WINDOW: 50,
   DEFAULT_SETTINGS: {
     settingsVersion: 2,
+    language: "auto",
     theme: "wisteria",
     alertEnabled: true,
     soundEnabled: true,
@@ -77,7 +78,7 @@ const CONFIG = {
     wsFallbackEnabled: true,
     persistChatSummaries: true,
     floatingAnimEnabled: true,
-    networkLabel: "未命名网络",
+    networkLabel: t("networkUnnamed"),
     conceptPinPositions: {},
     badgePosition: null,
     dashboardPosition: null,
@@ -95,6 +96,12 @@ const CONFIG = {
     CONVERSATION_STREAM: "/backend-api/f/conversation"
   }
 };
+
+/* ------------------------------------------------------------------ */
+/* I18N                                                                */
+/* ------------------------------------------------------------------ */
+
+const I18N={"zh-CN":{"floatTitle":"模型鉴定姬","floatTitleTooltip":"打开模型鉴定姬","floatPowTooltip":"查看 PoW 分析","floatCollecting":"正在采集本轮证据…","floatWaiting":"等待鉴定","verdict_NORMAL":"模型一致","verdict_ROUTE_NOTICE":"模型字段发生变化","verdict_MODEL_MISMATCH":"请求与应答模型不一致","verdict_EVIDENCE_CONFLICT":"路由证据冲突","verdict_UNKNOWN":"信息未完整捕获","verdict_insufficient":"信息不足","hook_READY":"正常","hook_PARTIAL":"部分可用","hook_FAILED":"异常","hook_unknown":"未知","requestedModel":"调用模型","assistantModel":"应答模型","serverModel":"服务器路由","resolvedModel":"服务器确认模型","modelsMatch":"模型一致","modelMismatch":"模型不一致","routeConflict":"路由证据冲突","incompleteEvidence":"证据未完整","routeFieldChanged":"模型字段发生变化","statusUndetermined":"状态未确定","networkUnnamed":"未命名网络","currentTurn":"本轮鉴定","waitingResponse":"等待应答","rttEstimate":"浏览器 RTT 粗略估算","downlinkEstimate":"浏览器下行估算","networkLabelHelp":"浏览器无法可靠读取 OpenClash 当前节点名，所以这里使用你自己定义的标签；之后每轮鉴定都会自动带上它。","archiveOverview":"总览","archiveRecords":"记录","archiveAnomaly":"异常监测","archiveModelsMatch":"模型一致","archiveReqNeqResp":"请求≠应答","archiveEvidenceConflict":"证据冲突","archiveNodePerf":"节点表现","archiveModelUsage":"模型使用比例","archiveNoData":"暂无数据","archiveEmpty":"暂无档案。","archiveOldRecord":"这条旧记录没有保存对话摘要","archiveNoReply":"尚未提取到回复摘要","networkCurrent":"当前网络","networkNodeLabel":"节点 / 网络名称（手动命名）","networkStats":"按网络标签统计","networkEmpty":"暂无网络统计。","networkRespCount":"应答","networkReqNeqRespLabel":"请求≠应答","networkRouteConflictLabel":"路由冲突","networkAvgPow":"平均 PoW","powAnalysis":"PoW 分析","powSamples":"样本","powAvgWork":"平均估算工作量","powMedianWork":"中位估算工作量","powLatestRaw":"最新 raw 阈值","powInsufficient":"PoW 样本不足，暂时无法画估算工作量趋势。","powYAxis":"估算工作量（期望尝试次数）","powFooter":"Y 轴越高 = 按公开逆向算法估算，需要的尝试次数越多。点位悬停可看该轮模型状态；这是逆向估算，不是 OpenAI 官方“风控分”。","powCollapsedHint":"默认折叠。点 PoW ⓘ 可以看“为什么平台使用它”。","powLegendNormal":"绿色 · 模型一致","powLegendMismatch":"红色 · 请求与应答不一致","powLegendConflict":"紫色 · 路由证据冲突","powLegendIncomplete":"黄色 · 证据未完整","powLegendUnlinked":"灰色 · 未关联模型记录","powTooltipRaw":"PoW raw","powTooltipWork":"估算工作量","powTooltipNetwork":"网络","powTooltipStatus":"状态","powTooltipEvidence":"证据完整度","powTooltipUnlinked":"未关联模型记录","settingsLanguage":"界面语言","settingsLanguageAuto":"自动（跟随浏览器）","settingsLanguageZhCN":"简体中文","settingsLanguageEn":"English","settingsLanguageHelp":"自动模式会根据浏览器语言选择中文或英文。切换后立即生效。","settingsAlert":"提醒方式","settingsAlertEnabled":"模型不一致或路由冲突时提醒我","settingsAlertDesc":"总开关：关闭后仍记录，但不主动打扰你","settingsToastEnabled":"页面弹窗提醒","settingsToastDesc":"出现模型不一致、路由冲突或服务器字段变化时，在页面顶部显示人话提示","settingsSoundEnabled":"播放提示音","settingsSoundDesc":"只在模型不一致或路由冲突时发声","settingsSoundType":"提示音","settingsVolume":"音量","settingsDisplay":"显示方式","settingsGhostWarning":"在异常回复下显示模型警告","settingsGhostWarningDesc":"如果这一轮请求与应答模型不一致，或服务器证据互相冲突，就在对应 ChatGPT 回复下面标出来","settingsPrivacy":"隐私与记录","settingsPersistChat":"记住每条记录对应的对话","settingsPersistChatDesc":"只保存少量 Prompt 与回复摘要，方便以后认出是哪一次对话；不会保存完整聊天","settingsAdvanced":"高级","settingsTitleFlash":"后台标签页闪烁","settingsTitleFlashDesc":"页面在后台时，如果出现模型不一致或路由冲突，用浏览器标签标题提醒你","settingsGhostMarkAll":"在每条回复下显示鉴定结果","settingsGhostMarkAllDesc":"默认关闭；开启后连正常回复也会显示模型标签","settingsFloatingAnim":"浮动监控条动画","settingsFloatingAnimDesc":"关闭后仍显示模型名、状态颜色与真实 PoW 波形，但停止脉冲沿线流动动画","settingsWsFallback":"WebSocket 备用捕获","settingsWsFallbackDesc":"只有 ChatGPT 改用 WebSocket 传输时才可能用到，平时不需要管","settingsPowRecord":"记录 PoW","settingsPowRecordDesc":"保存服务器返回的工作量证明难度，用于网络/风控趋势对比；它不是 IP 质量分","settingsFooter":"模型鉴定姬只观察网络证据，不修改请求、Header、Cookie、模型选择或 ChatGPT 的回答内容。","settingsAppearance":"外观","settingsTheme":"主题","settingsThemeHint":"主题会一起改变背景、卡片、用户/AI 气泡、状态色、图表和解释便签，不只是换一个主色。","settingsThemeSystem":"系统自动","conceptTooltip":"点开解释","toastMismatch":"模型不一致 · 请求与应答模型不同","toastConflict":"路由证据冲突 · 服务器字段互相矛盾","toastNotice":"模型字段发生变化 · 服务器侧模型字段与调用模型不同","titleFlash":"⚠ 模型鉴定姬：模型证据异常","localTopicUnnamed":"未命名对话","ghostMismatch":"⚠ 请求与应答模型不一致 · 核心对比不同","ghostNormal":"✓ 模型一致","ghostFieldChange":"△ 模型字段发生变化","ghostConflict":"◇ 路由证据冲突","msgUncaptured":t("msgUncaptured"),"userBubble":t("userBubble"),"userAsked":"你问","aiBubble":t("aiBubble"),"gptReplied":"ChatGPT 回答","codeReply":"代码回答","btnClose":"关闭","btnCopy":"复制诊断","btnGitHub":"GitHub ↗","btnGitHubTitle":"打开 GitHub 项目主页","btnSave":"保存标签","btnSaved":"已保存","btnExpand":"展开","btnCollapse":"收起","btnPin":"固定","btnPinned":"已固定","btnResetPos":"重置悬浮窗位置","btnClear":"清空历史和 PoW","btnPreview":"试听","tabCurrent":"当前","tabArchive":"档案","tabNetwork":"网络","tabSettings":"设置","brandPrimary":"模型鉴定姬","brandSecondary":"ChatGPT Model Downgrade Monitor","archiveReqRespMismatch":"请求与应答不一致","archiveRouteEvidenceConflict":"路由证据冲突","archiveServerFieldChange":"服务器字段变化","archiveIncomplete":"信息未完整","concept_pow_title":"PoW · 工作量证明","concept_requested_title":"调用模型","concept_assistant_title":"应答模型","concept_server_title":"服务器路由","concept_resolved_title":"服务器确认模型","concept_conflict_title":"路由证据冲突","concept_completeness_title":"证据完整度","concept_rtt_title":"浏览器 RTT 粗略估算","concept_downlink_title":"浏览器下行估算","concept_status_title":"状态判定是怎么来的","ledgerEmpty":"还没有正在进行的这一轮。发送一条消息后，这里会实时显示证据采集状态。","ledgerCore":"核心","ledgerServer":"服务器","ledgerNotCaptured":t("msgUncaptured"),"ledgerWaitingEvidence":"正在等待响应证据","ledgerMissing":t("msgUncaptured"),"ledgerWhy":"为什么出现这个结论？","ledgerWhyBoth":"两者不同，因此标记：请求与应答模型不一致","ledgerWhyMatch":"两者一致，核心对比匹配","ledgerWhyConflict":"服务器侧证据与应答不一致，附加：路由证据冲突","answerCardTitle":"模型档案 · 一问一答一张卡"},"en":{"floatTitle":"ChatGPT Model Downgrade Monitor","floatTitleTooltip":"Open Model Downgrade Monitor","floatPowTooltip":"View PoW analysis","floatCollecting":"Collecting turn evidence…","floatWaiting":"Awaiting verdict","verdict_NORMAL":"Models match","verdict_ROUTE_NOTICE":"Model field changed","verdict_MODEL_MISMATCH":"Model mismatch","verdict_EVIDENCE_CONFLICT":"Routing evidence conflict","verdict_UNKNOWN":"Incomplete evidence","verdict_insufficient":"Insufficient evidence","hook_READY":"Ready","hook_PARTIAL":"Partial","hook_FAILED":"Failed","hook_unknown":"Unknown","requestedModel":"Requested model","assistantModel":"Assistant model","serverModel":"Server route","resolvedModel":"Resolved model","modelsMatch":"Models match","modelMismatch":"Model mismatch","routeConflict":"Routing evidence conflict","incompleteEvidence":"Incomplete evidence","routeFieldChanged":"Model field changed","statusUndetermined":"Status undetermined","networkUnnamed":"Unnamed network","currentTurn":"Current turn","waitingResponse":"Waiting for reply","rttEstimate":"Browser RTT estimate","downlinkEstimate":"Browser downlink estimate","networkLabelHelp":"The browser cannot reliably read VPN/proxy node names, so this uses your own label; every future turn will automatically carry it.","archiveOverview":"Overview","archiveRecords":"Records","archiveAnomaly":"Anomaly monitoring","archiveModelsMatch":"Models match","archiveReqNeqResp":"Req ≠ Resp","archiveEvidenceConflict":"Evidence conflict","archiveNodePerf":"Node performance","archiveModelUsage":"Model usage ratio","archiveNoData":"No data","archiveEmpty":"Archive empty.","archiveOldRecord":"Chat summaries not saved for this old record","archiveNoReply":"Reply summary not yet extracted","networkCurrent":"Current network","networkNodeLabel":"Node / network name (manual label)","networkStats":"By network label","networkEmpty":"No network statistics.","networkRespCount":"Replies","networkReqNeqRespLabel":"Req ≠ Resp","networkRouteConflictLabel":"Route conflict","networkAvgPow":"Avg PoW","powAnalysis":"PoW analysis","powSamples":"Samples","powAvgWork":"Average estimated work","powMedianWork":"Median estimated work","powLatestRaw":"Latest raw threshold","powInsufficient":"Not enough PoW samples to draw an estimated work trend.","powYAxis":"Estimated work (expected attempts)","powFooter":"Higher Y-axis = more expected attempts under the public reverse-engineered algorithm. Hover a dot to see its model state; this is a reverse-engineering estimate, not an official OpenAI risk score.","powCollapsedHint":"Collapsed by default. Click PoW ⓘ for details.","powLegendNormal":"Green · Models match","powLegendMismatch":"Red · Model mismatch","powLegendConflict":"Purple · Route evidence conflict","powLegendIncomplete":"Yellow · Incomplete evidence","powLegendUnlinked":"Gray · Unlinked model record","powTooltipRaw":"PoW raw","powTooltipWork":"Estimated work","powTooltipNetwork":"Network","powTooltipStatus":"Status","powTooltipEvidence":"Evidence completeness","powTooltipUnlinked":"Unlinked model record","settingsLanguage":"Interface language","settingsLanguageAuto":"Auto (follow browser)","settingsLanguageZhCN":"简体中文","settingsLanguageEn":"English","settingsLanguageHelp":"Auto selects Chinese or English from your browser language. Changes apply immediately.","settingsAlert":"Alerts","settingsAlertEnabled":"Alert on model mismatch or route conflict","settingsAlertDesc":"Master switch: records silently when off, no interruptions","settingsToastEnabled":"Toast notification","settingsToastDesc":"Shows a plain-language notice at the top when a mismatch, conflict or field change occurs","settingsSoundEnabled":"Play alert sound","settingsSoundDesc":"Only sounds on model mismatch or route conflict","settingsSoundType":"Alert sound","settingsVolume":"Volume","settingsDisplay":"Display","settingsGhostWarning":"Show model warning below abnormal replies","settingsGhostWarningDesc":"When the requested and assistant model disagree or server evidence conflicts, mark it below the ChatGPT reply","settingsPrivacy":"Privacy & records","settingsPersistChat":"Remember chat summaries per record","settingsPersistChatDesc":"Saves a short prompt/reply digest so you can recognize past conversations; does not save the full chat","settingsAdvanced":"Advanced","settingsTitleFlash":"Tab title flash in background","settingsTitleFlashDesc":"When a mismatch or conflict occurs while the tab is in the background, flash the browser tab title","settingsGhostMarkAll":"Show verdict under every reply","settingsGhostMarkAllDesc":"Off by default; when on, even normal replies show the matched model label","settingsFloatingAnim":"Floating monitor animation","settingsFloatingAnimDesc":"When off, still shows model name, status color and live PoW waveform but stops the pulse travel animation","settingsWsFallback":"WebSocket fallback capture","settingsWsFallbackDesc":"Only needed if ChatGPT switches to WebSocket transport; usually safe to leave alone","settingsPowRecord":"Record PoW","settingsPowRecordDesc":"Save the server-returned proof-of-work difficulty for network/risk trend comparison; it is NOT an IP quality score","settingsFooter":"This monitor only observes network evidence. It does not modify requests, headers, cookies, model selection, or ChatGPT reply content.","settingsAppearance":"Appearance","settingsTheme":"Theme","settingsThemeHint":"The theme changes background, cards, user/AI bubbles, status colors, charts and pin windows together — not just one accent color.","settingsThemeSystem":"System auto","conceptTooltip":"Click to explain","toastMismatch":"Model mismatch · requested and assistant disagree","toastConflict":"Route evidence conflict · server fields contradict each other","toastNotice":"Model field changed · server-side field differs from requested model","titleFlash":"⚠ Model Downgrade Monitor: model evidence anomaly","localTopicUnnamed":"Unnamed chat","ghostMismatch":"⚠ Model mismatch","ghostNormal":"✓ Models match","ghostFieldChange":"△ Model field changed","ghostConflict":"◇ Route evidence conflict","msgUncaptured":"Not captured","userBubble":"You","userAsked":"You asked","aiBubble":t("aiBubble"),"gptReplied":"ChatGPT replied","codeReply":"Code reply","btnClose":"Close","btnCopy":"Copy Diagnostics","btnGitHub":"GitHub ↗","btnGitHubTitle":"Open GitHub project page","btnSave":"Save Label","btnSaved":"Saved","btnExpand":"Expand","btnCollapse":"Collapse","btnPin":"Pin","btnPinned":"Pinned","btnResetPos":"Reset floating bar position","btnClear":"Clear history & PoW","btnPreview":"Preview","tabCurrent":"Current","tabArchive":"Archive","tabNetwork":"Network","tabSettings":"Settings","brandPrimary":"ChatGPT Model Downgrade Monitor","brandSecondary":"模型鉴定姬","archiveReqRespMismatch":"Request/response mismatch","archiveRouteEvidenceConflict":"Route evidence conflict","archiveServerFieldChange":"Server field changed","archiveIncomplete":"Incomplete","concept_pow_title":"PoW · Proof of Work","concept_requested_title":"Requested model","concept_assistant_title":"Assistant model","concept_server_title":"Server route","concept_resolved_title":"Resolved model","concept_conflict_title":"Routing evidence conflict","concept_completeness_title":"Evidence completeness","concept_rtt_title":"Browser RTT estimate","concept_downlink_title":"Browser downlink estimate","concept_status_title":"How verdicts are determined","ledgerEmpty":"No active turn. Send a message and evidence capture will appear here.","ledgerCore":"Core","ledgerServer":"Server","ledgerNotCaptured":"Not captured","ledgerWaitingEvidence":"Waiting for response evidence","ledgerMissing":"Not captured","ledgerWhy":"Why this conclusion?","ledgerWhyBoth":"The two differ, therefore: Model mismatch","ledgerWhyMatch":"The two match, core comparison consistent","ledgerWhyConflict":"Server-side evidence disagrees with the assistant, additionally: Route evidence conflict","answerCardTitle":"Model archive · one card per turn"}};function currentLanguage(){var l=null;try{var r=localStorage.getItem(CONFIG.STORAGE_SETTINGS_KEY);var p=r?JSON.parse(r):null;l=p&&typeof p.language==="string"?p.language:"auto"}catch(e){l="auto"}if(l==="zh-CN")return"zh-CN";if(l==="en")return"en";try{var n=(navigator.language||"").toLowerCase();if(/^zh/.test(n))return"zh-CN";var ls=navigator.languages||[];for(var i=0;i<ls.length;i++)if(/^zh/.test(ls[i].toLowerCase()))return"zh-CN"}catch(e){}return"en"};function t(key,vars){var d=I18N[currentLanguage()]||I18N.en;var tx=d[key];if(tx===undefined||tx===null){var z=I18N["zh-CN"][key];if(z!==undefined&&z!==null)return z;return key}if(vars)for(var vk in vars)if(Object.prototype.hasOwnProperty.call(vars,vk))tx=tx.split("{"+vk+"}").join(String(vars[vk]!=null?vars[vk]:""));return tx};
 
 /* ------------------------------------------------------------------ */
 /* UTILS                                                               */
@@ -149,7 +156,7 @@ function boundedId(value) {
 }
 
 function friendlyModelName(slug) {
-  if (!slug) return "未捕获";
+  if (!slug) var _d=I18N[currentLanguage()]||I18N.en;return _d.msgUncaptured||"Not captured";
   const raw = String(slug);
   const m = raw.match(/^gpt-(\d+)-(\d+)(.*)$/i);
   if (!m) return raw;
@@ -214,7 +221,7 @@ function sentenceList(text) {
 
 function localTopic(text) {
   let t = normalizeChatText(text).replace(/```[\s\S]*?```/g, " [代码] ");
-  if (!t) return "未命名对话";
+  if (!t) return t("localTopicUnnamed");
   t = t.replace(/^(请|麻烦|帮我|能不能|可以|我想|我要|你能不能|你可以)\s*/i, "");
   const first = (sentenceList(t)[0] || t).replace(/^[:：,，\s]+/, "");
   return clipText(first, 26) || "未命名对话";
@@ -285,7 +292,7 @@ function currentNetworkSnapshot() {
       saveData: Boolean(c.saveData)
     };
   } catch {}
-  return { label: (settings.networkLabel || "未命名网络").trim() || "未命名网络", connection };
+  return { label: (settings.networkLabel || t("networkUnnamed")).trim() || t("networkUnnamed"), connection };
 }
 
 // B10: refresh coarse RTT/downlink display when the browser reports a change.
@@ -650,43 +657,14 @@ const VERDICT = Object.freeze({
   UNKNOWN: "UNKNOWN"
 });
 
-const UI_ZH = Object.freeze({
-  verdict: {
-    NORMAL: "模型一致",
-    ROUTE_NOTICE: "模型字段发生变化",
-    MODEL_MISMATCH: "请求与应答模型不一致",
-    DOWNGRADE_SUSPECTED: "请求与应答模型不一致",
-    EVIDENCE_CONFLICT: "路由证据冲突",
-    UNKNOWN: "信息未完整捕获"
-  },
-  confidence: { high: "高", medium: "中", low: "低" },
-  hook: { READY: "正常", PARTIAL: "部分可用", FAILED: "异常" }
-});
+/* I18N: old UI_ZH replaced by I18N + t() */
 
-function zhVerdict(value) {
-  return UI_ZH.verdict[value] || value || "信息不足";
-}
 
-function zhHook(value) {
-  return UI_ZH.hook[value] || value || "未知";
-}
+function zhVerdict(value) { return t("verdict_"+value) || value || t("verdict_insufficient"); }
 
-function zhReason(reason) {
-  let text = String(reason || "");
-  const replacements = [
-    ["route fields disagree with each other", "服务器路由字段彼此不一致"],
-    ["route field and assistant metadata disagree", "服务器路由字段与 Assistant 元数据不一致"],
-    ["requested model tier is higher than observed route model tier", "请求模型等级高于实际观测到的路由模型等级"],
-    ["route field differs from requested", "服务器路由字段与请求模型不同"],
-    ["assistant metadata differs from requested", "Assistant 元数据与请求模型不同"],
-    ["requested model differs from final assistant model", "调用模型与最终应答模型不同"],
-    ["insufficient evidence to compare", "当前证据不足，无法可靠比较"],
-    ["matches observed route evidence", "与当前观测到的路由证据一致"]
-  ];
-  for (const [from, to] of replacements) text = text.replace(from, to);
-  text = text.replace(/\(unknown\)/g, "（来源未知）");
-  return text;
-}
+function zhHook(value) { return t("hook_"+value) || value || t("hook_unknown"); }
+
+function zhReason(reason) { return reason; }
 
 const NON_COMMITTAL = /^(auto|default|gpt-4o-mini|gpt-5-mini|gpt-5-5-mini|gpt-5-6-mini)$/i;
 
@@ -1330,57 +1308,57 @@ function applyThemeVars(el, theme=activeTheme()) {
   for(const [k,v] of Object.entries(theme)) if(k!=="name") el.style.setProperty(`--${k}`,v);
 }
 
-const CONCEPTS = Object.freeze({
+function getConcepts() { return Object.freeze({
   pow:{title:"PoW · 工作量证明",lead:"服务器要求你的浏览器先完成一个计算挑战，再允许请求继续。",sections:[
     ["为什么平台会用它","自动脚本、爬虫和高频滥用可以非常廉价地制造大量请求。PoW 让每一次请求都先承担计算成本：正常用户通常感觉不到，但批量制造海量请求的总成本会明显上升，因此常用于提高自动化滥用的成本。"],
     ["为什么是用户的电脑来做","服务器负责给出挑战参数，你的浏览器自动计算答案，服务器再检查结果。PoW 要证明的正是“发起请求的一方确实为这次请求付出了计算资源”；如果计算都由服务器完成，就失去了提高客户端请求成本的意义。"],
     ["这个数字到底是什么","模型鉴定姬同时保存服务器返回的 difficulty 原始十六进制阈值和它的十进制显示值。它不是一个简单的“数字越大越难”的分数。公开逆向实现通常把它作为哈希前缀的通过阈值：在位数相同的情况下，阈值越小通常越严格；位数不同时不能直接拿十进制大小比较。"],
     ["模型鉴定姬怎么让它更好懂","除了原始阈值，图表会给出“估算工作量”：按公开逆向算法估算，一次随机尝试通过的概率约等于 (阈值+1) / 16^位数，因此期望尝试次数约为它的倒数。这个估算不是 OpenAI 官方指标，但比直接比较 400000、70000 这类原始数值更直观。"],
     ["常见误区","PoW 不是 IP 质量分。原始阈值高或估算工作量高，都不能单独证明“IP 差”“账号被风控”或“模型降级”。更合理的用法是比较长期分布，再和模型不一致/路由冲突是否同时变化做对照。"]]},
-  requested:{title:"调用模型",lead:"你点发送时，ChatGPT 网页要求服务器调用的模型。",sections:[
+  requested:{title:t("concept_requested_title"),lead:"你点发送时，ChatGPT 网页要求服务器调用的模型。",sections:[
     ["数据来自哪里","模型鉴定姬从本次 conversation 请求中读取模型字段。它回答的是：“网页这次向服务器请求的是什么模型？”"],
     ["为什么重要","它是比较的起点。只有先知道网页请求了什么模型，才能判断后续服务器字段和最终回答是否发生变化。"]]},
-  assistant:{title:"应答模型",lead:"这条 ChatGPT 回答自己标记的模型。",sections:[
+  assistant:{title:t("concept_assistant_title"),lead:"这条 ChatGPT 回答自己标记的模型。",sections:[
     ["什么是 Assistant 回复","ChatGPT 的数据结构把用户叫 user，把 ChatGPT 这一侧叫 assistant。白话就是：你发完问题后，屏幕上 ChatGPT 给你的那条回答。"],
     ["数据来自哪里","模型鉴定姬读取这条回答自身元数据中的 model_slug，用来回答：“最后这条 ChatGPT 回答标记自己是由什么模型生成的？”"],
     ["为什么重要","它和“调用模型”是两项核心对比。两者不同，就可以客观地说“请求与应答模型不一致”，无需先猜是不是降级。"]]},
-  server:{title:"服务器路由",lead:"ChatGPT 响应里暴露出的服务器侧模型路由字段。",sections:[
+  server:{title:t("concept_server_title"),lead:"ChatGPT 响应里暴露出的服务器侧模型路由字段。",sections:[
     ["它表示什么","模型鉴定姬读取类似 server_ste_metadata.model_slug 的字段，把它当作服务器内部路由的一项旁证。"],
     ["为什么不能单独下结论","服务器路由字段并不等于最终回答自己的模型标签。若它和应答模型不同，模型鉴定姬会标记“路由证据冲突”，而不是擅自选一个当真相。"]]},
-  resolved:{title:"服务器确认模型",lead:"服务器处理这次请求后，在返回数据里给出的模型标记。",sections:[
+  resolved:{title:t("concept_resolved_title"),lead:"服务器处理这次请求后，在返回数据里给出的模型标记。",sections:[
     ["白话解释","网页先告诉服务器“我要用这个模型”。服务器收到请求以后，返回的数据里有时还会给出 resolved_model_slug。可以把它理解成：“服务器收到你的模型请求以后，返回数据里把这次请求记成了哪个模型。”"],
     ["怎么使用","它是一项服务器侧证据。若它与调用模型或应答模型不同，会参与冲突判断；但它不会单独覆盖最终回答自己的模型标记。"]]},
-  conflict:{title:"路由证据冲突",lead:"不同来源报告了不同模型，模型鉴定姬不会替你猜哪个才是真相。",sections:[
+  conflict:{title:t("concept_conflict_title"),lead:"不同来源报告了不同模型，模型鉴定姬不会替你猜哪个才是真相。",sections:[
     ["调用模型","网页发送消息时，请求服务器使用的模型。"],
     ["服务器路由","服务器响应中暴露出的内部路由模型字段。"],
     ["应答模型","最终显示给你的 ChatGPT 回答自身携带的模型标记。"],
     ["为什么提示冲突","当已捕获证据中出现不止一种模型值，尤其服务器路由/确认字段与最终应答模型不一致时，会显示冲突并列出具体不同字段。"]]},
-  completeness:{title:"证据完整度",lead:"它表示这一轮成功捕获了多少项模型证据，不是“插件有多大把握”的主观分数。",sections:[
+  completeness:{title:t("concept_completeness_title"),lead:"它表示这一轮成功捕获了多少项模型证据，不是“插件有多大把握”的主观分数。",sections:[
     ["核心对比 2/2","核心对比只有两项：调用模型、应答模型，是“总证据”里的一个子集。2/2 表示两项都抓到了。"],
     ["总证据 4/4","总证据一共四项：调用模型、应答模型（核心对比），加服务器确认模型、服务器路由（服务器辅助证据）。4/4 表示四项都抓到了。"],
     ["为什么这样量化","核心对比是子集、总证据是全集，这样能把“信息不足”变成可检查的事实：到底缺的是哪一项，而不是给一个模糊的置信度百分比。"]]},
-  rtt:{title:"浏览器 RTT 粗略估算",lead:"navigator.connection.rtt 是浏览器提供的粗略网络往返延迟估算，单位毫秒（ms）。它是整数、更新不频繁，这是正常现象。",sections:[
+  rtt:{title:t("concept_rtt_title"),lead:"navigator.connection.rtt 是浏览器提供的粗略网络往返延迟估算，单位毫秒（ms）。它是整数、更新不频繁，这是正常现象。",sections:[
     ["这是粗略估算，不是精确 Ping","浏览器基于近期实际联网情况给出一个粗略估算值，可能长时间保持同一个整数（例如 100 ms）。它不会精确到小数，也不代表针对 OpenAI 单独做了一次实时 Ping。"],
     ["代理环境下包含哪一段","如果你使用 VPN、Clash 或其他代理，它反映的是浏览器实际联网环境的整体效果，可能包含你的电脑 → 本地网络 → 代理链路 → 远端网络 → 网站服务器。"],
     ["为什么不应据此判断模型路由","它可能更新不频繁，也不是针对当前这条 ChatGPT 请求测出的精确延迟，精度不足以用来判断模型是否降级。"],
     ["界面如何更新","浏览器支持 connection.change 事件时，模型鉴定姬会监听并刷新显示；不会为了让它变化而额外发起网络探测请求。"]]},
-  downlink:{title:"浏览器下行估算",lead:"浏览器根据近期连接估算的有效下载能力，通常以 Mbps 表示。",sections:[
+  downlink:{title:t("concept_downlink_title"),lead:"浏览器根据近期连接估算的有效下载能力，通常以 Mbps 表示。",sections:[
     ["它包含什么","使用代理时，这个数字体现的是浏览器当前整条联网环境的效果，不等同于你的宽带标称速度，也不等同于某个代理节点的单独限速。"],
     ["为什么记录","主要用于给网络环境留一个旁证，便于你比较不同节点或不同时间段；它不是模型路由判定指标。"]]},
-  status:{title:"状态判定是怎么来的",lead:"模型鉴定姬只根据已捕获字段之间是否一致来显示状态，不用模糊的“感觉像降级”。",sections:[
+  status:{title:t("concept_status_title"),lead:"模型鉴定姬只根据已捕获字段之间是否一致来显示状态，不用模糊的“感觉像降级”。",sections:[
     ["模型一致","调用模型与应答模型相同，并且已捕获的服务器侧模型字段没有与它们冲突。"],
     ["请求与应答模型不一致","两项核心对比 2/2 都已捕获，而且调用模型 ≠ 应答模型。这个提示只描述事实，不自动声称原因。"],
     ["路由证据冲突","服务器确认/服务器路由/应答模型之间出现不同模型值。界面会列出具体哪个字段不同。"],
     ["信息未完整捕获","核心对比没有达到 2/2，因此当前信息不足以直接比较“请求”和“最终回答”。"]]}
-});
+}); }
 
-function conceptButton(key,label="ⓘ") { return `<button class="info" data-concept="${escapeHtml(key)}" title="点开解释">${escapeHtml(label)}</button>`; }
+function conceptButton(key,label="ⓘ") { return `<button class="info" data-concept="${escapeHtml(key)}" title=\""+t("conceptTooltip")+"\">${escapeHtml(label)}</button>`; }
 function evidenceSnapshot(entry){
   const items=[
-    {key:"requested",label:"调用模型",value:entry&&entry.requestedModel,concept:"requested"},
-    {key:"resolved",label:"服务器确认",value:entry&&entry.resolvedModel,concept:"resolved"},
-    {key:"server",label:"服务器路由",value:entry&&entry.serverModel,concept:"server"},
-    {key:"assistant",label:"应答模型",value:entry&&entry.assistantModel,concept:"assistant"}
+    {key:"requested",label:t("requestedModel"),value:entry&&entry.requestedModel,concept:"requested"},
+    {key:"resolved",label:t("resolvedModel"),value:entry&&entry.resolvedModel,concept:"resolved"},
+    {key:"server",label:t("serverModel"),value:entry&&entry.serverModel,concept:"server"},
+    {key:"assistant",label:t("assistantModel"),value:entry&&entry.assistantModel,concept:"assistant"}
   ];
   const captured=items.filter(x=>x.value);
   const core=items.filter(x=>x.key==="requested"||x.key==="assistant");
@@ -1657,7 +1635,7 @@ const FloatingMonitor = {
       .bar:hover .bar-main-hit{padding-left:8px}
       .bar:hover .bar-pow-hit{flex:1;flex-basis:auto;padding:0 10px}
       @media(prefers-reduced-motion:reduce){.bar:hover{height:48px;max-width:280px;transition:none}.bar:hover .bar-model{opacity:1;width:auto;margin:0}.bar-model-status.collecting{animation:none}}
-    </style><div class="bar"><button class="bar-main-hit" data-region="main" title="打开模型鉴定姬"><span class="bar-seal">鉴</span><span class="bar-model"><span class="bar-model-name">模型鉴定姬</span><span class="bar-model-status hint"></span></span></button><button class="bar-pow-hit" data-region="pow" title="查看 PoW 分析"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg></button></div>`;
+    </style><div class="bar"><button class="bar-main-hit" data-region="main" title=\""+t("floatTitleTooltip")+"\"><span class="bar-seal">鉴</span><span class="bar-model"><span class="bar-model-name">"+t("floatTitle")+"</span><span class="bar-model-status hint"></span></span></button><button class="bar-pow-hit" data-region="pow" title=\""+t("floatPowTooltip")+"\"><svg class="wave-svg" width="90" height="44" viewBox="0 0 90 44"><polyline fill="none" stroke="var(--muted)" stroke-width="1.5" points="0,22 90,22"/></svg></button></div>`;
     try{document.documentElement.appendChild(this.host)}catch{return this.root}
     this.restorePosition();this.applyTheme();
     var bar=this.root.querySelector('.bar');
@@ -1777,23 +1755,23 @@ const FloatingMonitor = {
     if(info.model){
       nameEl.textContent=friendlyModelName(info.model);
     }else{
-      nameEl.textContent='模型鉴定姬';
+      nameEl.textContent=t('floatTitle');
     }
 
     statusEl.classList.remove('collecting','hint');
     if(info.isCollecting){
-      statusEl.textContent='正在采集本轮证据…';statusEl.classList.add('collecting');
+      statusEl.textContent=t('floatCollecting');statusEl.classList.add('collecting');
       accent=info.finalized?this.colorForVerdict(info.finalized.primaryVerdict,t):t.accent;
     }else if(info.verdict===VERDICT.NORMAL){
-      statusEl.textContent='模型一致';accent=t.normal;
+      statusEl.textContent=t('verdict_NORMAL');accent=t.normal;
     }else if(info.verdict===VERDICT.MODEL_MISMATCH||info.verdict===VERDICT.DOWNGRADE_SUSPECTED){
-      statusEl.textContent='请求与应答模型不一致';accent=t.danger;
+      statusEl.textContent=t('verdict_MODEL_MISMATCH');accent=t.danger;
     }else if(info.verdict===VERDICT.EVIDENCE_CONFLICT){
-      statusEl.textContent='路由证据冲突';accent=t.conflict;
+      statusEl.textContent=t('verdict_EVIDENCE_CONFLICT');accent=t.conflict;
     }else if(info.verdict===VERDICT.ROUTE_NOTICE){
-      statusEl.textContent='模型字段发生变化';accent=t.warn;
+      statusEl.textContent=t('verdict_ROUTE_NOTICE');accent=t.warn;
     }else if(info.verdict===VERDICT.UNKNOWN||!info.model){
-      statusEl.textContent='等待鉴定';statusEl.classList.add('hint');accent=t.muted;
+      statusEl.textContent=t('verdict_insufficient');statusEl.classList.add('hint');accent=t.muted;
     }else{
       statusEl.textContent='';statusEl.classList.add('hint');
     }
@@ -2062,7 +2040,7 @@ const Dashboard = {
       .pow-wrap{overflow-x:auto;padding-bottom:6px}.pow-svg{display:block;min-height:270px}.pow-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0}.pow-stat{padding:14px 10px;border-radius:11px;background:var(--surface2);text-align:center;border:1px solid var(--border);display:flex;flex-direction:column;justify-content:center;gap:5px}.pow-stat b{display:block;font-size:24px;font-weight:700;line-height:1.15}.pow-stat small{font-size:14px;font-weight:500;color:var(--muted)}
       .pin-window{position:fixed;width:min(390px,calc(100vw - 28px));max-height:min(560px,calc(100vh - 28px));overflow:auto;pointer-events:auto;background:var(--panel);color:var(--text);border:1px solid color-mix(in srgb,var(--accent) 38%,var(--border));border-radius:17px;box-shadow:0 20px 60px var(--shadow);z-index:20}.pin-head{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;background:color-mix(in srgb,var(--panel) 96%,transparent);border-bottom:1px solid var(--border);cursor:move;user-select:none}.pin-head b{font-size:13px}.pin-actions{display:flex;gap:5px}.pin-actions button{padding:3px 7px}.pin-body{padding:12px}.pin-lead{font-size:13px;font-weight:750;line-height:1.6;padding:9px 10px;border-radius:11px;background:color-mix(in srgb,var(--accent) 10%,var(--surface));margin-bottom:11px}.pin-section{margin:10px 0}.pin-section b{display:block;font-size:13px;color:var(--accent);margin-bottom:3px}.pin-section p{margin:0;font-size:13px;line-height:1.65;color:var(--muted)}
       .danger-text{color:var(--danger)!important}.ledger-item{border:1px solid var(--border);border-radius:11px;padding:9px 10px;margin:8px 0;background:var(--surface2)}.ledger-item.ledger-captured{border-left:3px solid var(--border)}.ledger-item.ledger-missing{border-left:3px solid var(--warn)}.ledger-item.cat-core{border-left-color:var(--accent2)}.ledger-item.cat-server{border-left-color:var(--accent)}.ledger-cat{display:inline-block;font-size:11px;font-weight:800;padding:1px 6px;border-radius:999px;margin-right:6px;border:1px solid transparent;vertical-align:middle}.ledger-cat.cat-core{background:color-mix(in srgb,var(--accent2) 16%,transparent);color:var(--accent2);border-color:color-mix(in srgb,var(--accent2) 40%,transparent)}.ledger-cat.cat-server{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}.ledger-row{display:flex;gap:8px;align-items:flex-start}.ledger-icon{font-weight:900;line-height:1.3}.ledger-main b{font-size:14px}.ledger-value{font-size:13px;font-weight:600;margin-top:2px}.ledger-source{font-size:12px;color:var(--muted)}.ledger-explain{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.5}.ledger-missing-list{font-size:13px;color:var(--warn);margin-top:8px;font-weight:600}.ledger-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}.ledger-status{font-size:13px;font-weight:700;color:var(--accent)}.ledger-why{border-top:1px solid var(--border);margin-top:10px;padding-top:8px;font-size:13px;line-height:1.55}.ledger-why b{font-size:14px}@media(max-width:720px){.panel{width:calc(100vw - 16px)!important;left:8px!important;resize:none}.statgrid,.splitgrid{grid-template-columns:1fr 1fr}.models{grid-template-columns:1fr auto 1fr}.content{padding:12px}}
-    </style><div class="overlay"><div class="panel"><div class="head" data-role="drag-handle"><div class="brand"><div class="brand-seal">鉴</div><div><b>模型鉴定姬</b><small>ChatGPT Model Downgrade Monitor</small></div></div><div class="head-actions"><a class="iconbtn" href="https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor" target="_blank" rel="noopener noreferrer" title="打开 GitHub 项目主页">GitHub ↗</a><button class="iconbtn" data-act="copy">复制诊断</button><button class="iconbtn" data-act="close">关闭</button></div></div><div class="tabs"><button class="tab" data-tab="current">当前</button><button class="tab" data-tab="archive">档案</button><button class="tab" data-tab="network">网络</button><button class="tab" data-tab="settings">设置</button></div><div class="content"><section class="pane" data-pane="current"></section><section class="pane" data-pane="archive"></section><section class="pane" data-pane="network"></section><section class="pane" data-pane="settings"></section></div></div></div>`;
+    </style><div class="overlay"><div class="panel"><div class="head" data-role="drag-handle"><div class="brand"><div class="brand-seal">鉴</div><div><b>"+t("brandPrimary")+"</b><small>"+t("brandSecondary")+"</small></div></div><div class="head-actions"><a class="iconbtn" href="https://github.com/DAIORANGE/chatgpt-model-downgrade-monitor" target="_blank" rel="noopener noreferrer" title=\""+t("btnGitHubTitle")+"\">"+t("btnGitHub")+"</a><button class="iconbtn" data-act="copy">"+t("btnCopy")+"</button><button class="iconbtn" data-act="close">"+t("btnClose")+"</button></div></div><div class="tabs"><button class="tab" data-tab="current">"+t("tabCurrent")+"</button><button class="tab" data-tab="archive">"+t("tabArchive")+"</button><button class="tab" data-tab="network">"+t("tabNetwork")+"</button><button class="tab" data-tab="settings">"+t("tabSettings")+"</button></div><div class="content"><section class="pane" data-pane="current"></section><section class="pane" data-pane="archive"></section><section class="pane" data-pane="network"></section><section class="pane" data-pane="settings"></section></div></div></div>`;
     try{document.documentElement.appendChild(this.host)}catch{return this.root}this.applyTheme();this.bindShell();this.restoreGeometry();return this.root;
   },
   applyTheme(){const root=this.root;if(!root)return;const overlay=root.querySelector('.overlay');if(overlay)applyThemeVars(overlay);for(const pin of root.querySelectorAll('.pin-window'))applyThemeVars(pin);Badge.applyTheme()},
@@ -2072,7 +2050,7 @@ const Dashboard = {
   restoreGeometry(force=false){const p=this.panel();if(!p)return;const st=loadSettings(),size=!force&&st.dashboardSize,pos=!force&&st.dashboardPosition,dw=Math.min(680,Math.max(470,window.innerWidth-48)),dh=Math.min(790,Math.max(430,window.innerHeight-72)),w=size&&Number.isFinite(size.width)?Math.min(Math.max(size.width,450),window.innerWidth-16):dw,h=size&&Number.isFinite(size.height)?Math.min(Math.max(size.height,350),window.innerHeight-16):dh;p.style.width=`${w}px`;p.style.height=`${h}px`;let l=pos&&Number.isFinite(pos.left)?pos.left:Math.max(16,window.innerWidth-w-24),t=pos&&Number.isFinite(pos.top)?pos.top:56;l=Math.max(8,Math.min(l,window.innerWidth-w-8));t=Math.max(8,Math.min(t,window.innerHeight-Math.min(h,80)-8));p.style.left=`${l}px`;p.style.top=`${t}px`},
   saveGeometry(){const p=this.panel();if(!p||window.innerWidth<=700)return;const r=p.getBoundingClientRect(),st=loadSettings();st.dashboardPosition={left:Math.round(r.left),top:Math.round(r.top)};st.dashboardSize={width:Math.round(r.width),height:Math.round(r.height)};saveSettings(st)},
   show(){const r=this.ensure();this.open=true;const o=r.querySelector('.overlay');if(o)o.style.display='block';this.applyTheme();this.render()},hide(){if(!this.root)return;this.open=false;const o=this.root.querySelector('.overlay');if(o)o.style.display='none'},toggle(){this.open?this.hide():this.show()},
-  openConcept(key,anchor){if(key==='completeness'){this.openEvidenceLedger(anchor);return}const data=CONCEPTS[key];if(!data||!this.root)return;const existing=this.openPins.get(key);if(existing&&existing.isConnected){existing.style.display='block';existing.focus();return}const win=document.createElement('div');win.className='pin-window';win.dataset.conceptKey=key;win.tabIndex=-1;applyThemeVars(win);const sections=data.sections.map(([h,t])=>`<div class="pin-section"><b>${escapeHtml(h)}</b><p>${escapeHtml(t)}</p></div>`).join('');win.innerHTML=`<div class="pin-head"><b>📌 ${escapeHtml(data.title)}</b><div class="pin-actions"><button class="iconbtn" data-pin-act="keep" title="固定这张解释卡">固定</button><button class="iconbtn" data-pin-act="close">×</button></div></div><div class="pin-body"><div class="pin-lead">${escapeHtml(data.lead)}</div>${sections}</div>`;this.root.querySelector('.overlay').appendChild(win);const st=loadSettings(),saved=st.conceptPinPositions&&st.conceptPinPositions[key];let left=saved&&Number.isFinite(saved.left)?saved.left:Math.min(window.innerWidth-410,Math.max(18,(anchor&&anchor.getBoundingClientRect().right+12)||80));let top=saved&&Number.isFinite(saved.top)?saved.top:Math.min(window.innerHeight-300,Math.max(18,(anchor&&anchor.getBoundingClientRect().top-20)||100));win.style.left=`${Math.max(8,left)}px`;win.style.top=`${Math.max(8,top)}px`;win.dataset.pinned=saved?'1':'0';this.openPins.set(key,win);this.installPinDrag(win,key);win.querySelector('[data-pin-act="close"]').addEventListener('click',()=>{this.openPins.delete(key);win.remove()});win.querySelector('[data-pin-act="keep"]').addEventListener('click',e=>{win.dataset.pinned='1';e.currentTarget.textContent='已固定';this.savePinPosition(win,key)});
+  openConcept(key,anchor){if(key==='completeness'){this.openEvidenceLedger(anchor);return}const data=getConcepts()[key];if(!data||!this.root)return;const existing=this.openPins.get(key);if(existing&&existing.isConnected){existing.style.display='block';existing.focus();return}const win=document.createElement('div');win.className='pin-window';win.dataset.conceptKey=key;win.tabIndex=-1;applyThemeVars(win);const sections=data.sections.map(([h,t])=>`<div class="pin-section"><b>${escapeHtml(h)}</b><p>${escapeHtml(t)}</p></div>`).join('');win.innerHTML=`<div class="pin-head"><b>📌 ${escapeHtml(data.title)}</b><div class="pin-actions"><button class="iconbtn" data-pin-act="keep" title="固定这张解释卡">固定</button><button class="iconbtn" data-pin-act="close">×</button></div></div><div class="pin-body"><div class="pin-lead">${escapeHtml(data.lead)}</div>${sections}</div>`;this.root.querySelector('.overlay').appendChild(win);const st=loadSettings(),saved=st.conceptPinPositions&&st.conceptPinPositions[key];let left=saved&&Number.isFinite(saved.left)?saved.left:Math.min(window.innerWidth-410,Math.max(18,(anchor&&anchor.getBoundingClientRect().right+12)||80));let top=saved&&Number.isFinite(saved.top)?saved.top:Math.min(window.innerHeight-300,Math.max(18,(anchor&&anchor.getBoundingClientRect().top-20)||100));win.style.left=`${Math.max(8,left)}px`;win.style.top=`${Math.max(8,top)}px`;win.dataset.pinned=saved?'1':'0';this.openPins.set(key,win);this.installPinDrag(win,key);win.querySelector('[data-pin-act="close"]').addEventListener('click',()=>{this.openPins.delete(key);win.remove()});win.querySelector('[data-pin-act="keep"]').addEventListener('click',e=>{win.dataset.pinned='1';e.currentTarget.textContent='已固定';this.savePinPosition(win,key)});
     // Only one unpinned explainer at a time; fixed cards can remain together.
     for(const [k,w] of this.openPins){if(k!==key&&w.dataset.pinned!=="1"){this.openPins.delete(k);w.remove()}}
   },
@@ -2083,10 +2061,10 @@ const Dashboard = {
     const isFinalized=turn.lifecycle===LIFECYCLE.FINALIZED;
     const isCollecting=!isFinalized;
     const items=[
-      {key:"requested",cat:"core",label:"调用模型",value:turn.requestedModel,source:"conversation request",explain:"网页发送这条消息时，请求服务器使用的模型。"},
-      {key:"assistant",cat:"core",label:"应答模型",value:turn.assistantModel,source:"assistant metadata",explain:"最终显示给你的这条 ChatGPT 回答自己携带的模型标记。"},
+      {key:"requested",cat:"core",label:t("requestedModel"),value:turn.requestedModel,source:"conversation request",explain:"网页发送这条消息时，请求服务器使用的模型。"},
+      {key:"assistant",cat:"core",label:t("assistantModel"),value:turn.assistantModel,source:"assistant metadata",explain:"最终显示给你的这条 ChatGPT 回答自己携带的模型标记。"},
       {key:"resolved",cat:"server",label:"服务器确认模型",value:turn.resolvedModel,source:"resolved_model_slug",explain:"服务器返回的数据里用于记录本次请求最终解析到哪个模型的字段。"},
-      {key:"server",cat:"server",label:"服务器路由",value:turn.serverModel,source:"server_ste_metadata",explain:"服务器响应中可能出现的额外路由模型信息。"}
+      {key:"server",cat:"server",label:t("serverModel"),value:turn.serverModel,source:"server_ste_metadata",explain:"服务器响应中可能出现的额外路由模型信息。"}
     ];
     const allCaptured=items.filter(x=>x.value).length;
     const coreCaptured=(turn.requestedModel?1:0)+(turn.assistantModel?1:0);
@@ -2157,12 +2135,12 @@ const Dashboard = {
   render(){try{const r=this.ensure();if(!r)return;this.applyTheme();r.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===this.activeTab));r.querySelectorAll('.pane').forEach(p=>p.classList.toggle('active',p.dataset.pane===this.activeTab));this.renderCurrent(r.querySelector('[data-pane="current"]'));this.renderArchive(r.querySelector('[data-pane="archive"]'));this.renderNetwork(r.querySelector('[data-pane="network"]'));this.renderSettings(r.querySelector('[data-pane="settings"]'))}catch(e){try{console.warn('[Model Downgrade Monitor] render failed',e)}catch{}}},
   routeCard(entry,compact=false){
     if(!entry)return '<div class="empty">还没有捕获到模型应答。发送一条消息后，这里会出现“调用模型 → 应答模型”。</div>';
-    const st=statusInfo(entry),call=entry.requestedModel,answer=entry.assistantModel||null,topic=entry.promptTopic||entry.replyTopic||'本轮对话',network=entry.networkLabel||'未命名网络';const prompt=entry.promptPreview||'（这条旧记录没有保存对话摘要）',reply=entry.replyPreview||'（尚未提取到回复摘要）';const tech=JSON.stringify({...entry,promptPreview:undefined,promptTopic:undefined,replyPreview:undefined,replyTopic:undefined},null,2);const resultMark=st.tone==='normal'?'✓':st.tone==='danger'?'≠':st.tone==='conflict'?'◇':st.tone==='warn'?'△':'?';const flow=st.tone==='normal'?{g:'✓',l:'模型一致',t:'normal',s:'is-normal'}:st.tone==='danger'?{g:'↛',l:'模型不一致',t:'danger',s:'is-mismatch'}:st.tone==='conflict'?{g:'⇄',l:'路由证据冲突',t:'conflict',s:'is-conflict'}:st.tone==='warn'?{g:'△',l:'模型字段变化',t:'warn',s:'is-incomplete'}:st.tone==='unknown'?{g:'…',l:'证据未完整',t:'warn',s:'is-incomplete'}:{g:'?',l:'状态未确定',t:'warn',s:'is-unknown'};const ambiguousSlug=Boolean(call&&answer&&call!==answer&&friendlyModelName(call)===friendlyModelName(answer));const slugFor=function(v){return ambiguousSlug?'<code>'+escapeHtml(v||'未捕获')+'</code>':'';};
+    const st=statusInfo(entry),call=entry.requestedModel,answer=entry.assistantModel||null,topic=entry.promptTopic||entry.replyTopic||t('localTopicUnnamed'),network=entry.networkLabel||t('networkUnnamed');const prompt=entry.promptPreview||'（这条旧记录没有保存对话摘要）',reply=entry.replyPreview||'（尚未提取到回复摘要）';const tech=JSON.stringify({...entry,promptPreview:undefined,promptTopic:undefined,replyPreview:undefined,replyTopic:undefined},null,2);const resultMark=st.tone==='normal'?'✓':st.tone==='danger'?'≠':st.tone==='conflict'?'◇':st.tone==='warn'?'△':'?';const flow=st.tone==='normal'?{g:'✓',l:t('modelsMatch'),t:'normal',s:'is-normal'}:st.tone==='danger'?{g:'↛',l:t('modelMismatch'),t:'danger',s:'is-mismatch'}:st.tone==='conflict'?{g:'⇄',l:t('routeConflict'),t:'conflict',s:'is-conflict'}:st.tone==='warn'?{g:'△',l:t('routeFieldChanged'),t:'warn',s:'is-incomplete'}:st.tone==='unknown'?{g:'…',l:t('incompleteEvidence'),t:'warn',s:'is-incomplete'}:{g:'?',l:t('statusUndetermined'),t:'warn',s:'is-unknown'};const ambiguousSlug=Boolean(call&&answer&&call!==answer&&friendlyModelName(call)===friendlyModelName(answer));const slugFor=function(v){return ambiguousSlug?'<code>'+escapeHtml(v||'未捕获')+'</code>':'';};
     return `<div class="card ${compact?'archive-card':'hero'} status-${st.tone}"><div class="verdictline"><div class="verdictwrap"><span class="verdict tone-${st.tone}">${escapeHtml(resultMark+' '+st.title)}</span>${conceptButton(st.tone==='conflict'?'conflict':'status')}</div><span class="time">${escapeHtml(new Date(entry.timestamp).toLocaleTimeString())}</span></div><div class="basis">${escapeHtml(st.basis)}<div class="metrics">${st.metrics.map(x=>`<span class="metric">${escapeHtml(x)}</span>`).join('')}${conceptButton('completeness')}</div></div><div class="dialogue"><div class="chatrow user"><div class="avatar">你</div><div class="bubble user"><div class="who">你问 · ${escapeHtml(topic)}</div><div class="preview">${escapeHtml(prompt)}</div></div></div><div class="models ${flow.s}"><div class="modelbox"><div class="modellabel">调用模型 ${conceptButton('requested')}</div><b>${escapeHtml(friendlyModelName(call))}</b>${slugFor(call)}</div><div class="flow-mid"><div class="arrow tone-${flow.t}">${flow.g}</div><div class="resultcheck tone-${flow.t}">${escapeHtml(flow.l)}</div></div><div class="modelbox"><div class="modellabel">应答模型 ${conceptButton('assistant')}</div><b>${escapeHtml(friendlyModelName(answer))}</b>${slugFor(answer)}</div></div><div class="chatrow assistant"><div class="bubble assistant"><div class="who">ChatGPT 回答${entry.replyIsCode?' · 代码回答':''}</div><div class="preview">${escapeHtml(reply)}</div></div><div class="avatar">AI</div></div></div><div style="margin-top:10px"><span class="network-chip">${escapeHtml(network)}</span></div><details><summary>技术证据</summary><div class="minirow" style="margin-top:8px">服务器确认模型 ${conceptButton('resolved')}：<b>${escapeHtml(friendlyModelName(entry.resolvedModel))}</b> · ${escapeHtml(entry.resolvedSource||'未捕获')}</div><div class="minirow">服务器路由 ${conceptButton('server')}：<b>${escapeHtml(friendlyModelName(entry.serverModel))}</b> · ${escapeHtml(entry.serverSource||'未捕获')}</div><div class="tech">${escapeHtml(tech)}</div>${Array.isArray(entry.internalMessages)&&entry.internalMessages.length?`<div class="tech">内部 message (${entry.internalMessages.length}):\n${escapeHtml(JSON.stringify(entry.internalMessages,null,2))}</div>`:''}</details></div>`;
   },
   renderCurrent(el){if(!el)return;const h=State.hookHealth(),last=State.lastRouteResult();el.innerHTML=`<div class="kicker">${last?'本轮鉴定':'等待应答'} · 捕获器 ${zhHook(h.overall)}</div>${this.routeCard(last,false)}<div class="muted">主界面只保留“这轮对话 / 调用了什么 / 什么模型回答 / 是否一致 / 当前网络”。服务器字段与其他技术项放在“技术证据”里。</div>`},
   renderArchive(el){
-    if(!el)return;const hist=State.historyForUi(),total=hist.length;const counts={normal:0,mismatch:0,conflict:0,notice:0,unknown:0};const models=new Map(),networks=new Map();for(const x of hist){if(x.verdict===VERDICT.NORMAL)counts.normal++;else if(x.verdict===VERDICT.EVIDENCE_CONFLICT)counts.conflict++;else if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED)counts.mismatch++;else if(x.verdict===VERDICT.ROUTE_NOTICE)counts.notice++;else counts.unknown++;const m=x.assistantModel||'未知';models.set(m,(models.get(m)||0)+1);const n=x.networkLabel||'未命名网络',g=networks.get(n)||{n:0,bad:0};g.n++;if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED||x.verdict===VERDICT.EVIDENCE_CONFLICT)g.bad++;networks.set(n,g)}
+    if(!el)return;const hist=State.historyForUi(),total=hist.length;const counts={normal:0,mismatch:0,conflict:0,notice:0,unknown:0};const models=new Map(),networks=new Map();for(const x of hist){if(x.verdict===VERDICT.NORMAL)counts.normal++;else if(x.verdict===VERDICT.EVIDENCE_CONFLICT)counts.conflict++;else if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED)counts.mismatch++;else if(x.verdict===VERDICT.ROUTE_NOTICE)counts.notice++;else counts.unknown++;const m=x.assistantModel||'未知';models.set(m,(models.get(m)||0)+1);const n=x.networkLabel||t('networkUnnamed'),g=networks.get(n)||{n:0,bad:0};g.n++;if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED||x.verdict===VERDICT.EVIDENCE_CONFLICT)g.bad++;networks.set(n,g)}
     const bars=[...models.entries()].sort((a,b)=>b[1]-a[1]).map(([m,n])=>`<div class="barrow"><div class="barhead"><span>${escapeHtml(friendlyModelName(m))}</span><span>${total?(n+' 次（'+(n/total*100).toFixed(1)+'%）'):(n+' 次 · —')}</span></div><div class="bar"><i style="width:${total?n/total*100:0}%"></i></div></div>`).join('');const netRows=[...networks.entries()].map(([n,g])=>`<div class="minirow"><b>${escapeHtml(n)}</b> · ${g.n} 次 · 模型不一致/冲突 ${g.bad} 次 · ${g.n?(g.bad/g.n*100).toFixed(1)+'%':'—'}</div>`).join('');
     el.innerHTML=`<div class="section-title">总览</div><div class="statgrid"><div class="stat"><b>${total}</b><small>记录</small></div><div class="stat"><b>${counts.normal}</b><small>模型一致</small></div><div class="stat"><b>${counts.mismatch}</b><small>请求≠应答</small></div><div class="stat"><b>${counts.conflict}</b><small>证据冲突</small></div></div><div class="splitgrid"><div class="card"><div class="section-title" style="margin-top:0">异常监测</div><div class="minirow">请求与应答不一致：<b>${counts.mismatch}</b></div><div class="minirow">路由证据冲突：<b>${counts.conflict}</b></div><div class="minirow">服务器字段变化：<b>${counts.notice}</b></div><div class="minirow">信息未完整：<b>${counts.unknown}</b></div></div><div class="card"><div class="section-title" style="margin-top:0">节点表现</div>${netRows||'<div class="empty">暂无数据</div>'}</div></div><div class="card"><div class="section-title" style="margin-top:0">模型使用比例</div>${bars||'<div class="empty">暂无数据</div>'}</div><div class="section-title">模型档案 · 一问一答一张卡</div>${hist.length?hist.map(x=>this.routeCard(x,true)).join(''):'<div class="empty">暂无档案。</div>'}`;
   },
@@ -2197,8 +2175,8 @@ const Dashboard = {
     return '<div class="pow-wrap">'+legend+'<div class="pow-svg-wrap" style="position:relative"><svg class="pow-svg" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" aria-label="PoW estimated work trend">'+grid+'<line x1="'+l+'" y1="'+(h-b)+'" x2="'+(w-r)+'" y2="'+(h-b)+'" stroke="var(--muted)"/><line x1="'+l+'" y1="'+tt+'" x2="'+l+'" y2="'+(h-b)+'" stroke="var(--muted)"/><text x="12" y="17" fill="var(--muted)" font-size="13">估算工作量（期望尝试次数）</text><polyline fill="none" stroke="var(--accent)" stroke-width="2" points="'+line+'"/>'+circles+'</svg><div class="pow-tooltip" data-role="pow-tooltip" style="display:none;position:absolute;z-index:6;pointer-events:none;max-width:300px"></div></div></div><div class="muted">Y 轴越高 = 按公开逆向算法估算，需要的尝试次数越多。点位悬停可看该轮模型状态；这是逆向估算，不是 OpenAI 官方"风控分"。</div>';
   },
   renderNetwork(el){
-    if(!el)return;const st=loadSettings(),hist=State.historyForUi(),groups=new Map();for(const x of hist){const k=x.networkLabel||'未命名网络',g=groups.get(k)||{n:0,mismatch:0,conflict:0,pow:[]};g.n++;if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED)g.mismatch++;if(x.verdict===VERDICT.EVIDENCE_CONFLICT)g.conflict++;const p=Number(x.powDecimal);if(Number.isFinite(p))g.pow.push(p);groups.set(k,g)}const rows=[...groups.entries()].map(([k,g])=>`<div class="card"><b>${escapeHtml(k)}</b><div class="minirow">应答 ${g.n} 次 · 请求≠应答 ${g.mismatch} · 路由冲突 ${g.conflict} · 平均 PoW ${g.pow.length?Math.round(g.pow.reduce((a,b)=>a+b,0)/g.pow.length).toLocaleString():'—'}</div></div>`).join('');const snap=currentNetworkSnapshot(),pow=loadPowHistory().slice(0,50),nums=pow.map(x=>Number(x.decimal)).filter(Number.isFinite),works=pow.map(x=>estimatePowWork(x.rawHex)).filter(Number.isFinite),sortedWork=[...works].sort((a,b)=>a-b),medianWork=sortedWork.length?sortedWork[Math.floor(sortedWork.length/2)]:null,avgWork=works.length?works.reduce((a,b)=>a+b,0)/works.length:null,latest=pow[0]||null;const c=snap.connection||{},fmtWork=v=>!Number.isFinite(v)?'—':v>=1000?`${(v/1000).toFixed(v>=10000?0:1)}k×`:v>=100?`${v.toFixed(0)}×`:v>=10?`${v.toFixed(1)}×`:`${v.toFixed(2)}×`;
-    el.innerHTML=`<div class="section-title">当前网络</div><div class="card"><div class="field"><label>节点 / 网络名称（手动命名）</label><input type="text" data-role="network-label" value="${escapeHtml(st.networkLabel||'未命名网络')}" maxlength="64"></div><button class="btn" data-act="save-network">保存标签</button><div class="muted" style="margin-top:8px">浏览器无法可靠读取 OpenClash 当前节点名，所以这里使用你自己定义的标签；之后每轮鉴定都会自动带上它。</div>${snap.connection?`<div class="splitgrid" style="margin-top:10px"><div class="minirow">浏览器 RTT 粗略估算 ${conceptButton('rtt')}<br><b>${Number.isFinite(c.rtt)?'≈ '+c.rtt+' ms':'—'}</b></div><div class="minirow">浏览器下行估算 ${conceptButton('downlink')}<br><b>${Number.isFinite(c.downlink)?c.downlink+' Mbps':'—'}</b></div></div>`:''}</div><div class="section-title">PoW 分析 ${conceptButton('pow')}</div><div class="card"><div class="pow-summary"><div class="pow-stat"><b>${pow.length}</b><small>样本</small></div><div class="pow-stat"><b>${fmtWork(avgWork)}</b><small>平均估算工作量</small></div><div class="pow-stat"><b>${fmtWork(medianWork)}</b><small>中位估算工作量</small></div><div class="pow-stat"><b>${latest&&latest.decimal?Number(latest.decimal).toLocaleString():'—'}</b><small>最新 raw 阈值</small></div></div><button class="btn" data-act="pow-toggle">${this.powExpanded?'收起':'展开'} PoW 趋势图</button>${this.powExpanded?this.powChart(pow):'<div class="muted" style="margin-top:8px">默认折叠。点 PoW ⓘ 可以看“为什么平台使用它、数字大小怎么读、为什么不能把它当 IP 质量分”。</div>'}</div><div class="section-title">按网络标签统计</div>${rows||'<div class="empty">暂无网络统计。</div>'}`;const save=el.querySelector('[data-act="save-network"]');if(save)save.addEventListener('click',()=>{const input=el.querySelector('[data-role="network-label"]'),s=loadSettings();s.networkLabel=(input.value||'未命名网络').trim().slice(0,64)||'未命名网络';saveSettings(s);save.textContent='已保存';setTimeout(()=>this.render(),450)});const pt=el.querySelector('[data-act="pow-toggle"]');if(pt)pt.addEventListener('click',()=>{this.powExpanded=!this.powExpanded;this.render()});this.wirePowTooltip(el)
+    if(!el)return;const st=loadSettings(),hist=State.historyForUi(),groups=new Map();for(const x of hist){const k=x.networkLabel||t('networkUnnamed'),g=groups.get(k)||{n:0,mismatch:0,conflict:0,pow:[]};g.n++;if(x.verdict===VERDICT.MODEL_MISMATCH||x.verdict===VERDICT.DOWNGRADE_SUSPECTED)g.mismatch++;if(x.verdict===VERDICT.EVIDENCE_CONFLICT)g.conflict++;const p=Number(x.powDecimal);if(Number.isFinite(p))g.pow.push(p);groups.set(k,g)}const rows=[...groups.entries()].map(([k,g])=>`<div class="card"><b>${escapeHtml(k)}</b><div class="minirow">应答 ${g.n} 次 · 请求≠应答 ${g.mismatch} · 路由冲突 ${g.conflict} · 平均 PoW ${g.pow.length?Math.round(g.pow.reduce((a,b)=>a+b,0)/g.pow.length).toLocaleString():'—'}</div></div>`).join('');const snap=currentNetworkSnapshot(),pow=loadPowHistory().slice(0,50),nums=pow.map(x=>Number(x.decimal)).filter(Number.isFinite),works=pow.map(x=>estimatePowWork(x.rawHex)).filter(Number.isFinite),sortedWork=[...works].sort((a,b)=>a-b),medianWork=sortedWork.length?sortedWork[Math.floor(sortedWork.length/2)]:null,avgWork=works.length?works.reduce((a,b)=>a+b,0)/works.length:null,latest=pow[0]||null;const c=snap.connection||{},fmtWork=v=>!Number.isFinite(v)?'—':v>=1000?`${(v/1000).toFixed(v>=10000?0:1)}k×`:v>=100?`${v.toFixed(0)}×`:v>=10?`${v.toFixed(1)}×`:`${v.toFixed(2)}×`;
+    el.innerHTML=`<div class="section-title">当前网络</div><div class="card"><div class="field"><label>节点 / 网络名称（手动命名）</label><input type="text" data-role="network-label" value="${escapeHtml(st.networkLabel||t('networkUnnamed'))}" maxlength="64"></div><button class="btn" data-act="save-network">保存标签</button><div class="muted" style="margin-top:8px">浏览器无法可靠读取 OpenClash 当前节点名，所以这里使用你自己定义的标签；之后每轮鉴定都会自动带上它。</div>${snap.connection?`<div class="splitgrid" style="margin-top:10px"><div class="minirow">浏览器 RTT 粗略估算 ${conceptButton('rtt')}<br><b>${Number.isFinite(c.rtt)?'≈ '+c.rtt+' ms':'—'}</b></div><div class="minirow">浏览器下行估算 ${conceptButton('downlink')}<br><b>${Number.isFinite(c.downlink)?c.downlink+' Mbps':'—'}</b></div></div>`:''}</div><div class="section-title">PoW 分析 ${conceptButton('pow')}</div><div class="card"><div class="pow-summary"><div class="pow-stat"><b>${pow.length}</b><small>样本</small></div><div class="pow-stat"><b>${fmtWork(avgWork)}</b><small>平均估算工作量</small></div><div class="pow-stat"><b>${fmtWork(medianWork)}</b><small>中位估算工作量</small></div><div class="pow-stat"><b>${latest&&latest.decimal?Number(latest.decimal).toLocaleString():'—'}</b><small>最新 raw 阈值</small></div></div><button class="btn" data-act="pow-toggle">${this.powExpanded?'收起':'展开'} PoW 趋势图</button>${this.powExpanded?this.powChart(pow):'<div class="muted" style="margin-top:8px">默认折叠。点 PoW ⓘ 可以看“为什么平台使用它、数字大小怎么读、为什么不能把它当 IP 质量分”。</div>'}</div><div class="section-title">按网络标签统计</div>${rows||'<div class="empty">暂无网络统计。</div>'}`;const save=el.querySelector('[data-act="save-network"]');if(save)save.addEventListener('click',()=>{const input=el.querySelector('[data-role="network-label"]'),s=loadSettings();s.networkLabel=(input.value||t('networkUnnamed')).trim().slice(0,64)||t('networkUnnamed');saveSettings(s);save.textContent='已保存';setTimeout(()=>this.render(),450)});const pt=el.querySelector('[data-act="pow-toggle"]');if(pt)pt.addEventListener('click',()=>{this.powExpanded=!this.powExpanded;this.render()});this.wirePowTooltip(el)
   },
   wirePowTooltip(el){
     var svg=el.querySelector('.pow-svg');if(!svg)return;
@@ -2392,7 +2370,7 @@ const GhostMarker = {
 
 const TitleFlasher = {
   timer:null,original:null,flashing:false,_stopHandler:null,
-  start(){if(this.flashing)return;const st=loadSettings();if(!st.titleFlashEnabled||!document.hidden)return;this.original=document.title;this.flashing=true;this._stopHandler=()=>this.stop();document.addEventListener('visibilitychange',this._stopHandler);window.addEventListener('focus',this._stopHandler);window.addEventListener('pointerdown',this._stopHandler,{passive:true});this.timer=window.setInterval(()=>{document.title=document.title==='⚠ 模型鉴定姬：模型证据异常'?this.original:'⚠ 模型鉴定姬：模型证据异常'},1200)},
+  start(){if(this.flashing)return;const st=loadSettings();if(!st.titleFlashEnabled||!document.hidden)return;this.original=document.title;this.flashing=true;this._stopHandler=()=>this.stop();document.addEventListener('visibilitychange',this._stopHandler);window.addEventListener('focus',this._stopHandler);window.addEventListener('pointerdown',this._stopHandler,{passive:true});this.timer=window.setInterval(()=>{document.title=document.title===t('titleFlash')?this.original:t('titleFlash')},1200)},
   stop(){if(this.timer)clearInterval(this.timer);this.timer=null;if(this.flashing&&this.original!==null)document.title=this.original;this.flashing=false;if(this._stopHandler){document.removeEventListener('visibilitychange',this._stopHandler);window.removeEventListener('focus',this._stopHandler);window.removeEventListener('pointerdown',this._stopHandler);this._stopHandler=null}}
 };
 
